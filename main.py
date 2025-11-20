@@ -10,9 +10,14 @@ def main():
     system_name = "IEEE 30 Barras"
     
     CONFIG = {
-        'load_scaling_bus_id': None,  # Global
-        'enforce_q_lims': False,      # True para realismo, False para teste de estresse puro (TCC)
+        'load_scaling_bus_id': None,  # Global (Correto: escala todo o sistema)
+        
+        # MUDANÇA 1: Desligar limites para ter Q infinito (como no TCC)
+        'enforce_q_lims': False,      
+        
+        # MUDANÇA 2: Ativar para que a Barra 2 ajude a Barra 1 (como no TCC)
         'distributed_slack': True,    
+        
         'max_scale': 5.0,
         'steps': 0.1,
         'min_step': 0.001
@@ -57,13 +62,13 @@ def main():
 
     # --- 4. Gráficos ---
     print("\n--- Gerando Visualizações ---")
-    # Gráfico da Curva PV (Adicionado conforme pedido anterior)
-    sim.tools.plot_pv_curves(history, title=f"Curva PV - {system_name}") # Precisa importar tools dentro do sim ou usar local
-    # Correção: a função de plotar PV está no analysis_tools, use tools.plot_pv_curves
-    # Vou corrigir a chamada abaixo:
     
-    tools.plot_pv_curves(history, title=f"Curva PV - {system_name}")
-    tools.plot_comparative_indices(all_results)
+    # Correção aqui: chamamos direto do módulo 'tools', não 'sim.tools'
+    try:
+        tools.plot_pv_curves(history, title=f"Curva PV - {system_name}")
+        tools.plot_comparative_indices(all_results)
+    except Exception as e:
+        print(f"Erro ao gerar gráficos: {e}")
 
     print("\nConcluído.")
 

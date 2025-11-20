@@ -12,8 +12,6 @@ def get_load_params(P, Q):
     return S, phi
 
 # --- ÍNDICES DE LINHA (Line VSIs) ---
-# (Mantidos iguais, focados no fluxo entre duas barras)
-
 def calculate_fvsi(V_s, X, Q_r, Z):
     if V_s == 0 or X == 0: return np.nan
     return (4 * Z**2 * Q_r) / (V_s**2 * X)
@@ -52,68 +50,85 @@ def calculate_vsi2(V_s, Q_r, R, X):
     if denom == 0: return np.nan
     return (4 * Q_r * (R + X)**2) / denom
 
-# --- ÍNDICES DE BARRA (Bus VSIs) ---
-# Calculados usando matrizes pré-processadas para velocidade
+def calculate_vqi(V_s, Q_r, X, R):
+    Z2 = R**2 + X**2
+    if Z2 == 0 or V_s == 0: return np.nan
+    B_mag = abs(X / Z2)
+    if B_mag == 0: return np.nan
+    return (4 * Q_r) / (B_mag * V_s**2)
+
+def calculate_ptsi(V_s, P_r, Q_r, Z, theta, phi):
+    if V_s == 0: return np.nan
+    S_r = np.sqrt(P_r**2 + Q_r**2)
+    return (2 * S_r * Z * (1 + np.cos(theta - phi))) / V_s**2
+
+def calculate_l_simple(V_s, V_r):
+    if V_s == 0: return np.nan
+    return (4 * (V_s * V_r - V_r**2)) / V_s**2
+
+def calculate_vcpi_power(V_s, Z, theta, phi, P_r, Q_r, kind='P'):
+    denom_max = 4 * Z * (np.cos((theta - phi)/2))**2
+    if denom_max == 0: return np.nan
+    if kind == 'P':
+        P_max = (V_s**2 / denom_max) * np.cos(phi)
+        return P_r / P_max if P_max != 0 else np.nan
+    elif kind == 'Q':
+        Q_max = (V_s**2 / denom_max) * np.sin(phi)
+        return Q_r / Q_max if Q_max != 0 else np.nan
+    elif kind == 'S':
+        S_max = (V_s**2 / denom_max)
+        S_r = np.sqrt(P_r**2 + Q_r**2)
+        return S_r / S_max if S_max != 0 else np.nan
+    return np.nan
+
+def calculate_si(V_s, V_r, P_r, Q_r, R, X, Z):
+    term1 = 2 * V_s**2 * V_r**2
+    term2 = V_r**4
+    term3 = 2 * V_r**2 * (P_r * R + Q_r * X)
+    term4 = Z**2 * (P_r**2 + Q_r**2)
+    return term1 - term2 - term3 - term4
+
+def calculate_vcpi_1_voltage(V_s, V_r, delta):
+    return V_r * np.cos(delta) - 0.5 * V_s
+
+def calculate_vsmi(delta, theta, phi):
+    delta_max = (theta - phi) / 2
+    if delta_max == 0: return np.nan
+    return (delta_max - abs(delta)) / delta_max
+
+def calculate_vslbi(V_s, V_r, delta):
+    v_drop_sq = V_s**2 + V_r**2 - 2*V_s*V_r*np.cos(delta)
+    if v_drop_sq <= 0: return 99.0
+    return V_r / np.sqrt(v_drop_sq)
+
+def calculate_vsi1(V_s, P_r, Q_r, X):
+    if X == 0 or V_s == 0: return np.nan
+    try:
+        P_max = V_s**2 / (4 * X)
+        Q_max = V_s**2 / (4 * X)
+        margin_p = 1 - (P_r / P_max)
+        margin_q = 1 - (Q_r / Q_max)
+        return min(margin_p, margin_q)
+    except:
+        return np.nan
+
+# --- 2. ÍNDICES DE BARRA VETORIZADOS ---
 
 def calculate_l_index_vectorized(V_complex, F_matrix, gen_indices, load_indices):
-    """
-    Calcula o L-index para todas as barras de carga de uma vez.
-    L_j = |1 - sum(F_ji * V_i / V_j)|
-    """
-    # V_load (vetor das tensões nas barras de carga)
     V_L = V_complex[load_indices]
-    # V_gen (vetor das tensões nas barras de geração)
     V_G = V_complex[gen_indices]
-    
-    # Numerador: sum(F_ji * V_i) -> Multiplicação Matricial F * V_G
-    # F_matrix deve ser shape (n_load, n_gen)
-    if V_L.size == 0 or V_G.size == 0:
-        return np.array([])
-        
+    if V_L.size == 0 or V_G.size == 0: return np.array([])
     numerator = F_matrix.dot(V_G)
-    
-    # Evita divisão por zero
     with np.errstate(divide='ignore', invalid='ignore'):
         L_values = np.abs(1 - (numerator / V_L))
-    
-    # Trata NaNs ou Infinitos resultantes de V_L ~ 0
-    L_values[~np.isfinite(L_values)] = 1.0 
-    
+    L_values[~np.isfinite(L_values)] = 0.0 # Se erro, assume 0 para não poluir gráfico
     return L_values
 
 def calculate_vcpi_bus_vectorized(V_complex, Y_bus_matrix):
-    """
-    Calcula VCPI_bus para todas as barras.
-    VCPI_k = |1 - sum(V_m') / V_k|
-    Onde V_m' = (Y_km / sum(Y_kj)) * V_m
-    """
-    # Soma das admitâncias de cada linha (diagonal da Ybus não serve diretamente aqui, 
-    # precisamos da soma da linha da matriz completa)
-    # Y_sum_rows = soma de elementos da linha k (excluindo a própria barra se a fórmula pedir, 
-    # mas a eq. usual é sobre Y_km V_m)
-    
-    # Implementação otimizada da Eq. 50 e 49:
-    # V_node = soma(Y_km * V_m) / soma(Y_km)
-    # Isso é basicamente (Y_bus * V) ./ (Y_bus * 1) se Ybus incluir shunts corretamente
-    
-    num_buses = V_complex.shape[0]
-    results = np.zeros(num_buses)
-    
-    # Soma das admitâncias conectadas a cada barra k (soma da linha k da Ybus)
     Y_sum = np.array(Y_bus_matrix.sum(axis=1)).flatten()
-    
-    # Corrente injetada "equivalente" I = Y * V
     I_inj = Y_bus_matrix.dot(V_complex)
-    
-    # O termo sum(V_m') da equação pode ser simplificado matricialmente
-    # V_m' = Y_km * V_m / Y_sum_k
-    # Sum(V_m') = (1/Y_sum_k) * Sum(Y_km * V_m) = (1/Y_sum_k) * I_inj_k
-    
     with np.errstate(divide='ignore', invalid='ignore'):
-        # Numerador total da fração interna
         term = I_inj / Y_sum
-        # Índice final
         VCPI = np.abs(1 - (term / V_complex))
-        
-    results = VCPI
-    return results
+    VCPI[~np.isfinite(VCPI)] = 0.0 # Limpeza de NaNs
+    return VCPI
