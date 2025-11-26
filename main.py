@@ -8,6 +8,8 @@ import shutil
 import sys
 import time
 
+import custom_systems as cs
+
 # ==============================================================================
 # ARQUIVO PRINCIPAL (MAIN)
 # ==============================================================================
@@ -28,26 +30,72 @@ def print_intro():
     """
     print(intro)
 
+def adjust_grid_physical_parameters(net):
+    """
+    Ajusta parâmetros físicos da rede para replicar exatamente o caso base
+    do TCC (Tensões iniciais dos geradores e estado dos shunts).
+    Baseado na Figura 4.5 do TCC.
+    """
+    print("\n--- AJUSTE FINO DE PARÂMETROS FÍSICOS (TENSÃO/SHUNTS) ---")
+    
+    # 1. Ajuste de Setpoints de Tensão dos Geradores (Fig 4.5 TCC)
+    # Os valores foram estimados visualmente do gráfico do TCC.
+    # O Pandapower usa net.gen e net.ext_grid para definir o vm_pu (tensão alvo)
+    
+    # Mapa {Barra: Tensão_PU}
+    target_voltages = {
+        1:  1.060, # Slack (Ext Grid)
+        2:  1.045,
+        5:  1.010,
+        8:  1.010,
+        11: 1.082,
+        13: 1.071
+    }
+    
+    print("Ajustando Setpoints de Tensão dos Geradores:")
+    
+    # Ajuste da Slack (Barra 1)
+    slack_idx = net.ext_grid[net.ext_grid.bus == 1].index
+    if not slack_idx.empty:
+        net.ext_grid.at[slack_idx[0], 'vm_pu'] = target_voltages[1]
+        print(f"  -> Slack (Barra 1): {target_voltages[1]} pu")
+
+    # Ajuste dos Geradores (Gen)
+    for bus_id, v_target in target_voltages.items():
+        if bus_id == 1: continue # Já feito na slack
+        
+        gen_idx = net.gen[net.gen.bus == bus_id].index
+        if not gen_idx.empty:
+            net.gen.at[gen_idx[0], 'vm_pu'] = v_target
+            print(f"  -> Gen (Barra {bus_id}): {v_target} pu")
+            
+    # 2. Verificação de Shunts (Capacitores)
+    # O IEEE 30 padrão tem shunts nas barras 10 e 24.
+    # Se a tensão não cai, experimente desligá-los (in_service = False)
+    if not net.shunt.empty:
+        print(f"\nShunts encontrados no sistema: {net.shunt.bus.values}")
+        # net.shunt['in_service'] = False # <--- DESCOMENTE PARA DESLIGAR E TESTAR
+        # print("  -> AVISO: Todos os Shunts foram DESLIGADOS para teste de estresse.")
+    
+    print("-" * 50)
+
 def select_system():
-    """
-    Permite selecionar um único sistema ou todos para execução em lote.
-    Retorna uma lista de tuplas: [(name, func), (name, func), ...]
-    """
     systems = {
         "1": ("IEEE 14 Barras", pn.case14),
-        "2": ("IEEE 30 Barras", pn.case30),
-        "3": ("IEEE 39 Barras (New England)", pn.case39),
+        "2": ("IEEE 30 Barras (Padrão)", pn.case30),
+        "3": ("IEEE 39 Barras", pn.case39),
         "4": ("IEEE 57 Barras", pn.case57),
-        "5": ("IEEE 118 Barras", pn.case118)
+        "5": ("IEEE 118 Barras", pn.case118),
+        "6": ("IEEE 30 ANAREDE (PWF TCC)", cs.create_ieee30_anarede) # <--- NOVA OPÇÃO
     }
     
     print("\nSELEÇÃO DO SISTEMA ELÉTRICO:")
-    print(f"  [0] TODAS AS REDES (Bateria de Testes)")
+    print(f"  [0] TODAS AS REDES")
     for key, (name, _) in systems.items(): 
         print(f"  [{key}] {name}")
         
-    choice = input("\nDigite a opção desejada (0-5): ").strip()
-    
+    choice = input("\nDigite a opção desejada (0-6): ").strip()
+
     if choice == "0":
         print("\n>> MODO BATERIA: Executando todos os sistemas sequencialmente.")
         return list(systems.values())
@@ -86,15 +134,26 @@ def main():
     
     # 1. Seleção (Retorna uma lista de sistemas)
     systems_to_run = select_system()
+
+
     
     # --- CONFIGURAÇÃO GERAL DA SIMULAÇÃO ---
+    # CONFIGURAÇÃO DO ESTUDO
     CONFIG = {
-        'load_scaling_bus_id': None, 
-        'enforce_q_lims': False,      
-        'distributed_slack': True,    
-        'max_scale': 5.0,             
-        'steps': 0.002,                
-        'min_step': 0.00001             
+        'load_scaling_bus_id': None,
+        'enforce_q_lims': False,
+        'distributed_slack': True,
+        
+        # MUDANÇA 1: Aumente isso para ver o colapso!
+        # Se não divergiu em 5.0, tente 10.0. O IEEE 30 sem limites Q é muito forte.
+        'max_scale': 10.0,             
+        
+        'steps': 0.002,
+        'min_step': 0.00001,
+        
+        # NOVOS PARÂMETROS ANAREDE
+        'max_iters': 2000,    # ICIT
+        'max_failures': 15    # DMAX
     }
     
     print(f"Parâmetros Globais: {CONFIG}")
@@ -111,10 +170,15 @@ def main():
         # Inicializa a rede
         log_step(1, f"Inicialização: {system_name}")
         net = case_func()
-        
-        # Ajuste específico para IEEE 30
-        if "IEEE 30" in system_name:
+
+        #/ 1. Ajuste de Geração (13.3%)
+        # Ajuste específico (Só aplica se for o IEEE 30 PADRÃO, não o ANAREDE customizado)
+        if "IEEE 30" in system_name and "ANAREDE" not in system_name:
             adjust_generator_participation(net)
+
+            # 2. NOVO: Ajuste de Tensões e Shunts
+            adjust_grid_physical_parameters(net)
+        
         
         # Preparação de Pastas para ESTE caso
         case_folder_name = system_name.replace(' ', '_').replace('(', '').replace(')', '').lower()
@@ -143,14 +207,19 @@ def main():
         # 3. Execução CPF
         log_step(3, "Executando Fluxo de Potência Continuado")
         history, full_log = sim.run_continuation_process(
-            net, 
-            load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
-            max_scale=CONFIG['max_scale'],
-            initial_step=CONFIG['steps'],
-            min_step=CONFIG['min_step'],
-            enforce_q_lims=CONFIG['enforce_q_lims'],
-            distributed_slack=CONFIG['distributed_slack']
-        )
+                net, 
+                load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
+                max_scale=CONFIG['max_scale'],
+                initial_step=CONFIG['steps'],
+                min_step=CONFIG['min_step'],
+                
+                # Passe os novos parâmetros aqui
+                max_iters=CONFIG['max_iters'],
+                max_failures=CONFIG['max_failures'],
+                
+                enforce_q_lims=CONFIG['enforce_q_lims'],
+                distributed_slack=CONFIG['distributed_slack']
+            )
         
         if not history: 
             print(f"Aviso: {system_name} não convergiu. Pulando...")

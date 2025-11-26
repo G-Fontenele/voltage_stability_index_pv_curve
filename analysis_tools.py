@@ -13,21 +13,45 @@ from datetime import datetime
 
 # --- 1. PRÉ-CÁLCULO DE MATRIZES ---
 def pre_calculate_matrices(net):
-    """Calcula matrizes estáticas (Ybus e F) para acelerar índices."""
+    """
+    Calcula matrizes estáticas (Ybus e F) para acelerar índices.
+    CORREÇÃO: Mapeamento robusto de ID Externo -> ID Interno.
+    """
     print("  -> Pré-calculando matrizes de admitância (Ybus) e participação (F)...")
+    
+    # Garante que a rede está inicializada
     pp.runpp(net)
+    
+    # Extrai Ybus (Matriz Esparsa Complexa Interna - Indexada de 0 a N-1)
     Ybus = net._ppc['internal']['Ybus']
-    bus_lookup = net._ppc['bus'][:, 0].astype(int)
-    bus_to_idx = {bus_id: i for i, bus_id in enumerate(bus_lookup)}
     
-    gen_buses = list(set(net.gen.bus.values.tolist() + net.ext_grid.bus.values.tolist()))
-    load_buses = [b for b in net.bus.index if b not in gen_buses and net.bus.at[b, 'in_service']]
+    # --- CORREÇÃO DE MAPEAMENTO DE ÍNDICES ---
+    # O pandapower renumera as barras internamente para 0, 1, 2...
+    # Precisamos do mapa: {ID_Externo_Usuário: ID_Interno_Matriz}
+    # Esse mapa fica em net._pd2ppc_lookups['bus']
+    bus_to_idx = {}
+    lookup = net._pd2ppc_lookups['bus']
     
-    idx_gen = [bus_to_idx[b] for b in gen_buses if b in bus_to_idx]
-    idx_load = [bus_to_idx[b] for b in load_buses if b in bus_to_idx]
+    # Itera sobre as barras originais do usuário (Ex: 1, 2, ..., 30)
+    for ext_id in net.bus.index:
+        if net.bus.at[ext_id, 'in_service']:
+            # Pega o índice interno correspondente
+            int_idx = lookup[ext_id]
+            # Salva no mapa
+            bus_to_idx[ext_id] = int(int_idx)
+            
+    # Separação de Barras para Matriz F (L-Index)
+    # Usamos os IDs externos para identificar os tipos
+    gen_buses_ext = list(set(net.gen.bus.values.tolist() + net.ext_grid.bus.values.tolist()))
+    load_buses_ext = [b for b in net.bus.index if b not in gen_buses_ext and net.bus.at[b, 'in_service']]
     
-    Y_LL = Ybus[idx_load, :][:, idx_load]
-    Y_LG = Ybus[idx_load, :][:, idx_gen]
+    # Converte para índices internos para fatiar a matriz Ybus
+    idx_gen_int = [bus_to_idx[b] for b in gen_buses_ext if b in bus_to_idx]
+    idx_load_int = [bus_to_idx[b] for b in load_buses_ext if b in bus_to_idx]
+    
+    # Particionamento da Ybus (Usando índices internos)
+    Y_LL = Ybus[idx_load_int, :][:, idx_load_int]
+    Y_LG = Ybus[idx_load_int, :][:, idx_gen_int]
     
     try:
         F_matrix = -inv(Y_LL).dot(Y_LG)
@@ -35,8 +59,14 @@ def pre_calculate_matrices(net):
         print("AVISO: Matriz Y_LL singular. L-index pode falhar.")
         F_matrix = None
 
-    return {'Ybus': Ybus, 'F_matrix': F_matrix, 'bus_to_idx': bus_to_idx, 
-            'idx_gen': idx_gen, 'idx_load': idx_load, 'load_buses_ids': load_buses}
+    return {
+        'Ybus': Ybus, 
+        'F_matrix': F_matrix, 
+        'bus_to_idx': bus_to_idx, # Mapa Externo -> Interno
+        'idx_gen_int': idx_gen_int, 
+        'idx_load_int': idx_load_int, 
+        'load_buses_ids': load_buses_ext # IDs Externos para o resultado final
+    }
 
 # --- 2. CÁLCULO DOS ÍNDICES ---
 def calculate_indices_for_scenario(snapshot, static_matrices):
@@ -46,24 +76,43 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
     line_data = snapshot['line_data']
     bus_data = snapshot['bus_data']
     
-    # Vetores de Tensão
-    bus_map = static_matrices['bus_to_idx']
-    V_complex = np.zeros(len(bus_map), dtype=complex)
-    for bus_id, matrix_idx in bus_map.items():
-        vm = res_bus.at[bus_id, 'vm_pu']
-        va_rad = np.radians(res_bus.at[bus_id, 'va_degree'])
+    # Vetores de Tensão (Reconstrução ordenada pela matriz interna)
+    bus_map = static_matrices['bus_to_idx'] # Chave = ID Externo, Valor = ID Interno
+    
+    # O tamanho do vetor deve ser o número de barras internas
+    num_buses = len(bus_map)
+    # Precisamos saber o tamanho máximo do índice interno para criar o array
+    max_int_idx = max(bus_map.values())
+    V_complex = np.zeros(max_int_idx + 1, dtype=complex)
+    
+    for bus_id_ext, matrix_idx in bus_map.items():
+        # Acessa res_bus usando ID Externo (que é o índice do DataFrame)
+        vm = res_bus.at[bus_id_ext, 'vm_pu']
+        va_rad = np.radians(res_bus.at[bus_id_ext, 'va_degree'])
         V_complex[matrix_idx] = vm * np.exp(1j * va_rad)
         
     # Índices de Barra
     l_index_map = {}
     if static_matrices['F_matrix'] is not None:
-        L_vals = vsi.calculate_l_index_vectorized(V_complex, static_matrices['F_matrix'], static_matrices['idx_gen'], static_matrices['idx_load'])
-        for i, bus_id in enumerate(static_matrices['load_buses_ids']):
-            l_index_map[bus_id] = L_vals[i]
+        # Usa índices internos para cálculo matricial
+        L_vals = vsi.calculate_l_index_vectorized(
+            V_complex, 
+            static_matrices['F_matrix'], 
+            static_matrices['idx_gen_int'], 
+            static_matrices['idx_load_int']
+        )
+        # Mapeia de volta para ID Externo
+        for i, bus_id_ext in enumerate(static_matrices['load_buses_ids']):
+            l_index_map[bus_id_ext] = L_vals[i]
     
     vcpi_vals = vsi.calculate_vcpi_bus_vectorized(V_complex, static_matrices['Ybus'])
-    idx_to_bus = {v: k for k, v in bus_map.items()}
-    vcpi_map = {idx_to_bus[i]: val for i, val in enumerate(vcpi_vals)}
+    
+    # Cria mapa reverso: Interno -> Externo para mapear o VCPI
+    idx_int_to_ext = {v: k for k, v in bus_map.items()}
+    vcpi_map = {}
+    for int_idx, val in enumerate(vcpi_vals):
+        if int_idx in idx_int_to_ext:
+            vcpi_map[idx_int_to_ext[int_idx]] = val
 
     results = []
     s_base = 100.0
@@ -120,12 +169,20 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
 # --- 3. PLOTAGEM ---
 
 def plot_pv_curves(history, title="Curvas PV", save_dir="."):
-    """
-    Plota Curvas PV com cores distintas e salva no diretório especificado.
-    """
     p_total = [snap['total_load_mw'] for snap in history]
     vm_data = [snap['res_bus']['vm_pu'].values for snap in history]
     df_vm = pd.DataFrame(vm_data, index=p_total)
+    
+    # Mapeia colunas do DF (indices internos do array numpy) para IDs externos das barras
+    # O history salva vm_pu como array numpy puro, sem indices.
+    # Precisamos saber qual coluna é qual barra.
+    # A ordem do array em res_bus['vm_pu'].values segue o índice do DataFrame res_bus.
+    # Se res_bus tem indices 1, 2, 3... a coluna 0 é Barra 1.
+    # Vamos assumir que a ordem se mantém.
+    
+    # Recupera os IDs das barras do primeiro snapshot para nomear as colunas
+    bus_ids = history[0]['res_bus'].index
+    df_vm.columns = bus_ids
     
     last_step_voltages = df_vm.iloc[-1]
     critical_bus_idx = last_step_voltages.idxmin()
@@ -159,18 +216,15 @@ def plot_pv_curves(history, title="Curvas PV", save_dir="."):
     plt.grid(True, which='both', linestyle='--', alpha=0.4)
     plt.tight_layout()
     
-    # Salva no diretório especificado
     filename = os.path.join(save_dir, "curva_pv_sistema.png")
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Gráfico da Curva PV salvo em: {filename}")
 
 def plot_comparative_indices(all_scenarios_results, save_dir="."):
-    """Gera gráficos de índices e salva no diretório especificado."""
     first_key = list(all_scenarios_results.keys())[0]
     all_cols = all_scenarios_results[first_key].columns
     indices_cols = [c for c in all_cols if c not in ['Line_ID', 'From', 'To']]
-    
     bus_indices_names = ['L_index', 'VCPI_bus'] 
     scenario_keys = sorted(list(all_scenarios_results.keys()))
     cmap = plt.cm.get_cmap('turbo')
@@ -181,16 +235,13 @@ def plot_comparative_indices(all_scenarios_results, save_dir="."):
     for ind_name in indices_cols:
         plt.figure(figsize=(10, 6))
         is_bus_index = ind_name in bus_indices_names
-        
         limit = 1.0
         if ind_name in ['SI', 'VCPI_1', 'VSMI', 'VSI_1']: limit = 0.0
-        
         max_val_scenario = 0.0
         
         for i, pct in enumerate(scenario_keys):
             df = all_scenarios_results[pct]
             df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[ind_name])
-            
             if is_bus_index:
                 df_plot = df_clean[['To', ind_name]].drop_duplicates(subset=['To'])
                 df_plot = df_plot[df_plot[ind_name] > 0.001]
@@ -214,34 +265,27 @@ def plot_comparative_indices(all_scenarios_results, save_dir="."):
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
-        # Salva no diretório especificado
         filename = os.path.join(save_dir, f'analise_{ind_name.lower()}.png')
         plt.savefig(filename, dpi=150)
         plt.close()
-    
     print("Gráficos de índices salvos.")
 
 # --- 4. RELATÓRIOS TXT ---
-
 def generate_anarede_report(history, system_name, filepath):
-    """Gera relatório detalhado. Salva no caminho completo filepath."""
     snap = history[-1]
     res_bus, res_line = snap['res_bus'], snap['res_line']
     max_load, scale = snap['total_load_mw'], snap['scale']
-    
     header = f"""
 {'='*80}
 RELATORIO DE ANALISE DE ESTABILIDADE DE TENSAO (SIMULADOR PYTHON)
 SISTEMA: {system_name.upper()}
 DATA: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 {'='*80}
-
 RESUMO DO PONTO DE COLAPSO
 --------------------------
 Fator de Escala Final (Lambda): {scale:.4f}
 Carregamento Total do Sistema : {max_load:.2f} MW
 Tensao Minima do Sistema      : {res_bus['vm_pu'].min():.4f} pu (Barra {res_bus['vm_pu'].idxmin()})
-
 ESTADO DAS BARRAS
 {'='*80}
 BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
@@ -253,13 +297,10 @@ BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
         b_type = "PQ"
         if abs(row['p_mw']) > 0 and row['vm_pu'] > 0.99: b_type = "PV/REF"
         content += f"{bus_id:<7} | {row['vm_pu']:<7.4f} | {row['va_degree']:<9.2f} | {row['p_mw']:<10.2f} | {row['q_mvar']:<12.2f} | {b_type}\n"
-        
     content += f"\n{'='*80}\nFLUXO NAS LINHAS\n{'='*80}\n"
     content += f"LINHA   | DE      | PARA    | P_DE (MW) | Q_DE (Mvar) | CARREG (%)\n{'-'*80}\n"
-    
     col_load = 'loading_percent' if 'loading_percent' in res_line.columns else 'p_from_mw'
     sorted_lines = res_line.sort_values(by=col_load, ascending=False)
-
     for line_id, row in sorted_lines.iterrows():
         from_bus = snap['line_data'].at[line_id, 'from_bus']
         to_bus = snap['line_data'].at[line_id, 'to_bus']
@@ -270,14 +311,12 @@ BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
     print(f"  -> Relatório de Colapso salvo em: {filepath}")
 
 def generate_convergence_report(full_log, system_name, filepath):
-    """Gera relatório de convergência. Salva no caminho completo filepath."""
     header = f"""
 {'='*100}
 RELATORIO DE EXECUCAO DO FLUXO DE POTENCIA CONTINUADO (CONVERGENCIA)
 SISTEMA: {system_name.upper()}
 DATA: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 {'='*100}
-
 NUM.    STATUS          PASSO (LAMBDA)    CARGA TOTAL (MW)    CARGA TOTAL (Mvar)    TENSAO MIN (PU)
 {'-'*100}
 """
