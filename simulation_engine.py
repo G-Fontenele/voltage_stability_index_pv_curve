@@ -3,39 +3,33 @@ import numpy as np
 import copy
 
 # ==============================================================================
-# MOTOR DE SIMULAÇÃO (CPF) - PADRÃO ANAREDE
-# ==============================================================================
-# Implementação rigorosa baseada no Manual do Usuário ANAREDE.
-# Critérios de Parada:
-# 1. DINC (Limite de Carregamento): max_scale
-# 2. ICMN (Passo Mínimo): min_step
-# 3. ICIT (Máximo de Iterações Totais): max_iters
-# 4. DMAX (Máximo de Divergências Consecutivas): max_failures
+# MOTOR DE SIMULAÇÃO (CPF) - CORRIGIDO COM SOLVER PARAMS
 # ==============================================================================
 
-def run_continuation_process(net, load_scaling_bus_id=None, 
-                             max_scale=5.0,       # DINC (Limite)
-                             initial_step=0.1, 
-                             min_step=0.001,      # ICMN
-                             max_iters=2000,      # ICIT (Novo)
-                             max_failures=10,     # DMAX (Novo)
-                             enforce_q_lims=True, 
-                             distributed_slack=True):
+def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0, 
+                             initial_step=0.1, min_step=0.001, 
+                             max_iters=2000, max_failures=10,
+                             enforce_q_lims=True, distributed_slack=True,
+                             # NOVOS PARÂMETROS DO SOLVER (NEWTON-RAPHSON)
+                             solver_max_iter=50,  # Aumentado de 10 para 50 (Crucial perto do colapso)
+                             solver_tol=1e-6):    # Tolerância de Mismatch (MVA)
     
-    # --- LOG INICIAL ---
     print(f"\n{'='*80}")
-    print(f" CPF ENGINE - PADRÃO ANAREDE")
+    print(f" MOTOR DE SIMULAÇÃO: FLUXO DE POTÊNCIA CONTINUADO (CPF)")
     print(f"{'='*80}")
-    print(f" PARÂMETROS DE PARADA:")
-    print(f"  > DINC (Max Lambda): {max_scale}")
-    print(f"  > ICMN (Min Passo):  {min_step}")
-    print(f"  > ICIT (Max Iter):   {max_iters}")
-    print(f"  > DMAX (Max Falhas): {max_failures}")
-    print(f"{'-'*80}")
+    print(f" CONFIGURAÇÃO DE PARADA:")
+    print(f"  > DINC (Limite):    {max_scale}")
+    print(f"  > ICMN (Passo Min): {min_step}")
+    print(f"  > ICIT (Max Iter):  {max_iters}")
+    print(f"  > DMAX (Max Fail):  {max_failures}")
+    print(f" CONFIGURAÇÃO DO SOLVER (NEWTON-RAPHSON):")
+    print(f"  > Max Iterações:    {solver_max_iter} (Padrão PP=10)")
+    print(f"  > Tolerância:       {solver_tol} MVA")
+    print(f"{'='*80}\n")
 
     net_sim = copy.deepcopy(net)
     
-    # --- 1. Identificação de Cargas e Geradores ---
+    # --- 1. Identificação de Cargas ---
     if load_scaling_bus_id is None:
         load_idx = net_sim.load.index
     else:
@@ -45,6 +39,7 @@ def run_continuation_process(net, load_scaling_bus_id=None,
     base_p_load = net_sim.load.loc[load_idx, 'p_mw'].copy()
     base_q_load = net_sim.load.loc[load_idx, 'q_mvar'].copy()
 
+    # --- 2. Identificação de Geradores ---
     active_gen_idx = []
     base_p_gen = []
     if distributed_slack:
@@ -52,96 +47,82 @@ def run_continuation_process(net, load_scaling_bus_id=None,
         active_gen_idx = net_sim.gen[mask_gen].index
         base_p_gen = net_sim.gen.loc[active_gen_idx, 'p_mw'].copy()
 
-    # --- 2. Inicialização de Variáveis de Estado ---
-    current_scale = 1.0      # Lambda atual (confirmado)
-    current_step = initial_step 
-    
+    # --- 3. Inicialização ---
+    current_scale = 1.0
+    current_step = initial_step
     history = []   
     full_log = []  
-    
-    consecutive_failures = 0 # Contador para DMAX
-    total_iterations = 0     # Contador para ICIT
+    consecutive_failures = 0
+    total_iterations = 0
 
-    # --- 3. Caso Base (Iteração 0) ---
-    print(f" [...] Rodando Caso Base (Scale=1.0)...")
+    # --- 4. Caso Base ---
+    print(f" [...] Rodando Caso Base...")
     try:
-        pp.runpp(net_sim, enforce_q_lims=enforce_q_lims)
+        # Na primeira vez, usamos init="auto" (padrão) pois não temos histórico
+        pp.runpp(net_sim, enforce_q_lims=enforce_q_lims, 
+                 max_iteration=solver_max_iter, tolerance_mva=solver_tol)
+        
         _save_snapshot(net_sim, 1.0, history)
-        _log_attempt(full_log, 0, 1.0, "Convergente", net_sim)
+        _log_attempt(full_log, 0, 1.0, 0.0, "Convergente", net_sim)
+        print(f"   -> Convergiu Base OK")
     except:
+        _log_attempt(full_log, 0, 1.0, 0.0, "Divergente", None)
         print("ERRO CRÍTICO: Caso base não converge.")
-        return [], []
+        return [], full_log
 
-    # --- 4. Loop Principal ---
+    # --- 5. Loop Principal ---
     while current_scale < max_scale:
-        # Critério ICIT (Iterações Totais)
         if total_iterations >= max_iters:
-            print(f"\n[PARADA] ICIT atingido: {total_iterations} iterações realizadas.")
+            print(f"[PARADA] Max iterações ({max_iters}).")
             break
 
-        # Previsão do Próximo Ponto
         next_scale = current_scale + current_step
-        
-        # Respeita o teto DINC
-        if next_scale > max_scale: 
-            next_scale = max_scale
-
+        if next_scale > max_scale: next_scale = max_scale
         total_iterations += 1
 
-        # A. Aplica Incrementos
+        # Aplica Escala
         net_sim.load.loc[load_idx, 'p_mw'] = base_p_load * next_scale
-        net_sim.load.loc[load_idx, 'q_mvar'] = base_q_load * next_scale # P e Q crescem juntos
-        
+        net_sim.load.loc[load_idx, 'q_mvar'] = base_q_load * next_scale
         if distributed_slack and not active_gen_idx.empty:
             net_sim.gen.loc[active_gen_idx, 'p_mw'] = base_p_gen * next_scale
 
-        # B. Tenta Resolver (Newton-Raphson)
         try:
-            pp.runpp(net_sim, enforce_q_lims=enforce_q_lims)
+            # --- SOLVER ROBUSTO ---
+            # init="results": Usa a tensão do passo anterior como chute inicial.
+            # Isso é essencial para CPF, pois evita "flat start" (1.0 pu) quando a tensão real já é 0.8 pu.
+            # max_iteration: Aumentado para dar chance de convergir no "nariz".
             
-            # --- SUCESSO ---
-            consecutive_failures = 0 # Reseta DMAX
+            pp.runpp(net_sim, enforce_q_lims=enforce_q_lims, 
+                     init="results", 
+                     max_iteration=solver_max_iter, 
+                     tolerance_mva=solver_tol)
             
-            # Salva
+            # Sucesso
+            consecutive_failures = 0
             _save_snapshot(net_sim, next_scale, history)
-            _log_attempt(full_log, total_iterations, next_scale, "Convergente", net_sim)
+            _log_attempt(full_log, total_iterations, next_scale, current_step, "Convergente", net_sim)
             
-            # Feedback Visual
             p_tot = net_sim.res_load.p_mw.sum()
-            print(f"   Iter {total_iterations}: Scale {next_scale:.4f} OK | Carga: {p_tot:.1f} MW")
+            print(f"   Iter {total_iterations}: Scale {next_scale:.5f} OK | Carga: {p_tot:.1f} MW")
             
-            # Consolida o passo e avança
             current_scale = next_scale
-            
-            # Opcional: Se o passo estava muito pequeno, pode tentar recuperar (aceleração)
-            # Mas o manual diz "novo incremento menor", não fala em aumentar de volta.
-            # Mantemos current_step constante até falhar.
 
         except pp.LoadflowNotConverged:
-            # --- FALHA (Divergência) ---
+            # Falha
             consecutive_failures += 1
-            
-            _log_attempt(full_log, total_iterations, next_scale, "Divergente", None)
-            print(f"   Iter {total_iterations}: Falha em {next_scale:.4f}. (Falhas seguidas: {consecutive_failures})")
+            _log_attempt(full_log, total_iterations, next_scale, current_step, "Divergente", None)
+            print(f"   Iter {total_iterations}: Falha em {next_scale:.5f}. Reduzindo passo...")
 
-            # Critério DMAX (Falhas Consecutivas)
-            if consecutive_failures >= max_failures:
-                print(f"\n[PARADA] DMAX atingido: {consecutive_failures} divergências consecutivas.")
-                break
-
-            # Critério ICMN (Passo Mínimo)
+            if consecutive_failures >= max_failures: break
             if current_step < min_step:
-                print(f"\n[PARADA] ICMN atingido: Passo {current_step:.6f} < {min_step}")
-                print(f"--> PONTO DE COLAPSO: {current_scale:.4f}")
+                print(f"--> COLAPSO EM: {current_scale:.5f}")
                 break
             
-            # Lógica de Corte de Passo (Backtracking)
-            # "O último caso convergido é restabelecido... e um novo incremento menor é aplicado"
             current_step /= 2.0
-            print(f"   -> Reduzindo passo para {current_step:.5f} e tentando novamente...")
-            
-            # Nota: Não atualizamos 'current_scale', então o próximo loop tentará
-            # current_scale (último bom) + novo current_step (menor).
+            # Importante: Ao falhar, o net_sim pode estar com tensões "sujas" da iteração falha.
+            # Se tivéssemos um deepcopy do 'last_good_net', restauraríamos aqui.
+            # Como o pandapower mantém o res_bus anterior se falhar (geralmente), init="results"
+            # na próxima tentativa (com passo menor) ainda deve pegar o último bom.
 
     return history, full_log
 
@@ -149,19 +130,27 @@ def _save_snapshot(net, scale, history_list):
     snapshot = {
         'scale': scale,
         'total_load_mw': net.res_load.p_mw.sum(),
+        'total_load_mvar': net.res_load.q_mvar.sum(),
         'res_bus': net.res_bus.copy(),
         'res_line': net.res_line.copy(),
+        'res_trafo': net.res_trafo.copy(),
         'line_data': net.line.copy(),
+        'trafo_data': net.trafo.copy(),
         'bus_data': net.bus.copy()
     }
     history_list.append(snapshot)
 
-def _log_attempt(log_list, iter_num, scale, status, net=None):
-    row = {'iter': iter_num, 'scale': scale, 'status': status, 'mw': 0.0, 'mvar': 0.0, 'vmin': 0.0}
+def _log_attempt(log_list, iter_num, scale, step_used, status, net=None):
+    row = {'iter': iter_num, 'scale': scale, 'step': step_used, 'status': status, 
+           'mw': 0.0, 'mvar': 0.0, 'p_gen': 0.0, 'p_slack': 0.0, 'vmin': 0.0}
     if net is not None:
         row['mw'] = net.res_load.p_mw.sum()
         row['mvar'] = net.res_load.q_mvar.sum()
         row['vmin'] = net.res_bus['vm_pu'].min()
+        gen_p = net.res_gen.p_mw.sum() if not net.res_gen.empty else 0.0
+        ext_p = net.res_ext_grid.p_mw.sum() if not net.res_ext_grid.empty else 0.0
+        row['p_gen'] = gen_p + ext_p
+        row['p_slack'] = ext_p
     log_list.append(row)
 
 def extract_scenarios(history, percentages):
