@@ -94,7 +94,7 @@ def main():
         
         # NOVOS PARÂMETROS SOLVER
         'solver_max_iter': 20,  # Dá mais tempo para convergir no nariz
-        'solver_tol': 1e-4      # Tolerância padrão (pode relaxar para 1e-5 se estiver muito difícil)
+        'solver_tol': 0.1      # Tolerância padrão (pode relaxar para 1e-5 se estiver muito difícil)
     }
     print(f"Parâmetros Globais: {CONFIG}")
 
