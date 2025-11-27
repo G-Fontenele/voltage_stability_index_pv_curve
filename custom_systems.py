@@ -7,9 +7,27 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
     Gera um arquivo .pwf formatado como ANAREDE, incluindo os resultados
     de P e Q dos geradores para validação fiel.
     """
+    CONFIG = {
+        'load_scaling_bus_id': None, 
+        'enforce_q_lims': False,      
+        'distributed_slack': True,    
+        'max_scale': 5.0,             
+        'steps': 0.002,                
+        'min_step': 0.0005,
+        'max_iters': 2000,
+        'max_failures': 15,
+        
+        # NOVOS PARÂMETROS SOLVER
+        'solver_max_iter': 20,  # Dá mais tempo para convergir no nariz
+        'solver_tol': 0.1      # Tolerância padrão (pode relaxar para 1e-5 se estiver muito difícil)
+    }
+
     # Tenta rodar para ter resultados atualizados, mas não trava se falhar
     try:
-        pp.runpp(net)
+        pp.runpp(net, enforce_q_lims=CONFIG['enforce_q_lims'], 
+                     init="flat", 
+                     max_iteration=CONFIG['solver_max_iter'], 
+                     tolerance_mva=CONFIG['solver_tol'])
     except:
         pass # Exporta com os valores de entrada (setpoints) se não convergir
 
@@ -185,7 +203,6 @@ def create_ieee30_anarede():
     # Outros PVs (Adicionado q_mvar_ini na tupla)
     # (Bus, P_mw, V_set, Q_min, Q_max, Q_ini_PWF)
     gens_data = [
-        (1,  260.2, 1.060, -9999, 99999, -16.1),
         (2,  40.0, 1.043, -40.0, 50.0, 50.0),
         (5,   0.0, 1.010, -40.0, 40.0, 37.0),
         (8,   0.0, 1.010, -10.0, 40.0, 37.3),
