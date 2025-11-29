@@ -1,5 +1,5 @@
-import pandapower as pp
 import pandapower.networks as pn
+import pandapower as pp
 import simulation_engine as sim
 import analysis_tools as tools
 import os
@@ -12,7 +12,7 @@ import custom_systems as cs
 # ARQUIVO PRINCIPAL (MAIN)
 # ==============================================================================
 
-TOTAL_STEPS = 8
+TOTAL_STEPS = 9 # Aumentado para 9 (Incluindo exportação PWF)
 
 def log_step(step_num, message):
     print(f"\n[{step_num}/{TOTAL_STEPS}] {message}")
@@ -32,7 +32,7 @@ def select_system():
     systems = {
         "1": ("IEEE 14 Barras", pn.case14),
         "2": ("IEEE 30 Barras (Padrão)", pn.case30),
-        "3": ("IEEE 39 Barras", pn.case39),
+        "3": ("IEEE 39 Barras (New England)", pn.case39),
         "4": ("IEEE 57 Barras", pn.case57),
         "5": ("IEEE 118 Barras", pn.case118),
         "6": ("IEEE 30 ANAREDE (PWF TCC)", cs.create_ieee30_anarede)
@@ -40,16 +40,10 @@ def select_system():
     print("\nSELEÇÃO DO SISTEMA ELÉTRICO:")
     print(f"  [0] TODAS AS REDES (Bateria de Testes)")
     for key, (name, _) in systems.items(): print(f"  [{key}] {name}")
-    
     choice = input("\nDigite a opção desejada (0-6): ").strip()
-    
-    if choice == "0":
-        return list(systems.values())
-    elif choice in systems:
-        return [systems[choice]]
-    else:
-        print("Opção inválida. Usando IEEE 30 Padrão.")
-        return [systems["2"]]
+    if choice == "0": return list(systems.values())
+    elif choice in systems: return [systems[choice]]
+    else: return [systems["2"]]
 
 def adjust_generator_participation(net):
     """Ajusta o despacho inicial do Gerador 2 para 13.3% (Apenas IEEE 30 Padrão)."""
@@ -88,13 +82,11 @@ def main():
         'distributed_slack': True,    
         'max_scale': 5.0,             
         'steps': 0.002,                
-        'min_step': 0.0005,
+        'min_step': 0.00001,
         'max_iters': 2000,
         'max_failures': 15,
-        
-        # NOVOS PARÂMETROS SOLVER
-        'solver_max_iter': 20,  # Dá mais tempo para convergir no nariz
-        'solver_tol': 0.1      # Tolerância padrão (pode relaxar para 1e-5 se estiver muito difícil)
+        'solver_max_iter': 20,
+        'solver_tol': 0.1
     }
     print(f"Parâmetros Globais: {CONFIG}")
 
@@ -111,10 +103,12 @@ def main():
         # Preparação de Pastas
         case_folder_name = system_name.replace(' ', '_').replace('(', '').replace(')', '').lower()
         base_output_dir = os.path.join("outputs", case_folder_name)
+        
         sheets_dir = os.path.join(base_output_dir, "index_sheets")
         figures_dir = os.path.join(base_output_dir, "index_figures")
         pv_dir = os.path.join(base_output_dir, "pv_figures")
         reports_dir = os.path.join(base_output_dir, "reports")
+        network_dir = os.path.join(base_output_dir, "network") # <--- NOVA PASTA
         
         if os.path.exists(base_output_dir):
             try: shutil.rmtree(base_output_dir)
@@ -124,45 +118,54 @@ def main():
         os.makedirs(figures_dir, exist_ok=True)
         os.makedirs(pv_dir, exist_ok=True)
         os.makedirs(reports_dir, exist_ok=True)
+        os.makedirs(network_dir, exist_ok=True) # <--- CRIA PASTA NETWORK
 
-        # 2. Relatório Inicial
-        log_step(2, "Gerando Relatório do Caso Base")
+        # 2. Exportação do PWF (Registro do Caso)
+        log_step(2, "Exportando Rede (PWF)")
+        pwf_name = f"{case_folder_name}_base.pwf"
+        pwf_path = os.path.join(network_dir, pwf_name)
+        try:
+            cs.export_pwf_anarede(net, pwf_path)
+            print(f"  -> Rede salva em: {pwf_path}")
+        except Exception as e:
+            print(f"Aviso: Falha ao exportar PWF ({e})")
+
+        # 3. Relatório Inicial
+        log_step(3, "Gerando Relatório do Caso Base")
         rep_initial = os.path.join(reports_dir, "relatorio_inicial_base.txt")
         tools.generate_initial_report(net, system_name, rep_initial)
 
-        # 3. Matrizes
-        log_step(3, "Pré-Cálculo de Matrizes")
+        # 4. Matrizes
+        log_step(4, "Pré-Cálculo de Matrizes")
         try: static_matrices = tools.pre_calculate_matrices(net)
         except Exception as e: 
             print(f"Erro fatal na topologia: {e}")
             continue
 
-        # 4. Execução CPF
-        log_step(4, "Executando Fluxo de Potência Continuado")
+        # 5. Execução CPF
+        log_step(5, "Executando Fluxo de Potência Continuado")
         history, full_log = sim.run_continuation_process(
-                net, 
-                load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
-                max_scale=CONFIG['max_scale'],
-                initial_step=CONFIG['steps'],
-                min_step=CONFIG['min_step'],
-                max_iters=CONFIG['max_iters'],
-                max_failures=CONFIG['max_failures'],
-                enforce_q_lims=CONFIG['enforce_q_lims'],
-                distributed_slack=CONFIG['distributed_slack'],
-                
-                # Passa os parâmetros do solver
-                solver_max_iter=CONFIG['solver_max_iter'],
-                solver_tol=CONFIG['solver_tol']
-            )
+            net, 
+            load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
+            max_scale=CONFIG['max_scale'],
+            initial_step=CONFIG['steps'],
+            min_step=CONFIG['min_step'],
+            max_iters=CONFIG['max_iters'],
+            max_failures=CONFIG['max_failures'],
+            enforce_q_lims=CONFIG['enforce_q_lims'],
+            distributed_slack=CONFIG['distributed_slack'],
+            solver_max_iter=CONFIG['solver_max_iter'],
+            solver_tol=CONFIG['solver_tol']
+        )
         
         if not history: 
             print(f"Aviso: {system_name} não convergiu. Pulando...")
             continue
 
-        # 5. Extração e Tabelas
-        log_step(5, "Extração e Tabelas")
+        # 6. Extração e Tabelas
+        log_step(6, "Extração e Tabelas")
         scenarios = sim.extract_scenarios(history, [0, 25, 50, 75, 95, 99, 100])
-        all_results = {} # Dicionário para plotagem
+        all_results = {} 
         
         for pct, snapshot in scenarios.items():
             df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
@@ -172,20 +175,22 @@ def main():
                 df.to_csv(os.path.join(sheets_dir, csv_name), index=False)
             except: pass
 
-        # 6. Gráficos
-        log_step(6, "Geração de Gráficos")
+        # 7. Gráficos
+        log_step(7, "Geração de Gráficos")
         try:
             tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir)
             tools.plot_comparative_indices(all_results, save_dir=figures_dir)
         except Exception as e: print(f"Erro gráfico: {e}")
 
-        # 7. Relatórios Finais
-        log_step(7, "Gerando Relatórios Finais")
+        # 8. Relatórios Finais
+        log_step(8, "Gerando Relatórios Finais")
         rep_col = os.path.join(reports_dir, "relatorio_colapso.txt")
         rep_conv = os.path.join(reports_dir, "relatorio_convergencia.txt")
         
         tools.generate_anarede_report(history, system_name, rep_col)
-        log_step(8, "Finalizando Caso")
+        
+        # 9. Finalização
+        log_step(9, "Finalizando Caso")
         tools.generate_convergence_report(full_log, system_name, rep_conv)
 
     # --- FIM GERAL ---

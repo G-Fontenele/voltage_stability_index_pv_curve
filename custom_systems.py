@@ -5,10 +5,27 @@ import os
 def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
     """
     Gera um arquivo .pwf formatado como ANAREDE.
-    ATUALIZADO: Agora lê corretamente Taps modelados via Tap Changer.
+    ATUALIZADO: Usa solver robusto para tentar preencher resultados.
     """
-    try: pp.runpp(net); 
-    except: pass
+    # Configuração do Solver (Cópia da sua config de alta precisão)
+    SOLVER_CONFIG = {
+        'enforce_q_lims': False,     # Q Infinito (TCC)
+        'distributed_slack': True,   # (Não afeta runpp simples, só CPF)
+        'solver_max_iter': 20,       # Mais fôlego
+        'solver_tol': 0.1            # Tolerância relaxada (0.1 MW)
+    }
+
+    # Tenta rodar o fluxo para ter resultados de P e Q para exportar
+    try:
+        pp.runpp(net, 
+                 enforce_q_lims=SOLVER_CONFIG['enforce_q_lims'],
+                 init="flat",  # Flat start é ok para o caso base leve
+                 max_iteration=SOLVER_CONFIG['solver_max_iter'],
+                 tolerance_mva=SOLVER_CONFIG['solver_tol'])
+        print("  -> Fluxo de validação convergiu. Exportando resultados reais.")
+    except:
+        print("  -> Aviso: Fluxo de validação não convergiu. Exportando setpoints.")
+        pass
 
     s_base = 100.0
     
@@ -22,6 +39,7 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
             row = net.bus.loc[idx]
             num, nome = idx, str(row['name'])[:12]
             
+            # Se rodou, pega resultado. Senão, pega setpoint.
             if not net.res_bus.empty and idx in net.res_bus.index:
                 v_pu, ang = net.res_bus.at[idx, 'vm_pu'], net.res_bus.at[idx, 'va_degree']
             else:
@@ -33,8 +51,9 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
             
             loads = net.load[net.load.bus == idx]
             if not loads.empty: pl = loads.p_mw.sum(); ql = loads.q_mvar.sum()
+            
             shunts = net.shunt[net.shunt.bus == idx]
-            if not shunts.empty: bc = -shunts.q_mvar.sum()
+            if not shunts.empty: bc = -shunts.q_mvar.sum() # Inverte sinal
 
             slacks = net.ext_grid[net.ext_grid.bus == idx]
             if not slacks.empty:
@@ -51,7 +70,8 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
                 qmin += gens.min_q_mvar.sum(); qmax += gens.max_q_mvar.sum()
                 if not net.res_gen.empty:
                     for gen_i in gens.index:
-                        pg += net.res_gen.at[gen_i, 'p_mw']; qg += net.res_gen.at[gen_i, 'q_mvar']
+                        pg += net.res_gen.at[gen_i, 'p_mw']
+                        qg += net.res_gen.at[gen_i, 'q_mvar']
                 else:
                     pg += gens.p_mw.sum(); qg += gens.q_mvar.sum()
 
@@ -72,6 +92,8 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
             z_base = (vn**2) / 100.0
             r_pct = (row.r_ohm_per_km * row.length_km / z_base) * 100
             x_pct = (row.x_ohm_per_km * row.length_km / z_base) * 100
+            
+            # Susceptância
             w = 2 * np.pi * 60
             b_siemens = (row.c_nf_per_km * row.length_km * 1e-9) * w
             mvar_ch = b_siemens * (vn**2)
@@ -82,15 +104,13 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
             r_pct = row.vkr_percent
             xp = np.sqrt(max(0, row.vk_percent**2 - r_pct**2))
             
-            # CÁLCULO DO TAP REAL (Considerando Tap Changer)
-            # Fórmula: Ratio = 1 + (pos - neutral) * step/100
+            # Cálculo do Tap Real
             if not np.isnan(row.tap_pos):
                 step = row.tap_step_percent
                 pos = row.tap_pos
                 neutral = row.tap_neutral
                 tap_final = 1 + (pos - neutral) * (step / 100.0)
             else:
-                # Fallback para método antigo (Vn/Vn)
                 vn_base_hv = net.bus.at[hv, 'vn_kv']
                 tap_final = row.vn_hv_kv / vn_base_hv
 
@@ -173,11 +193,11 @@ def create_ieee30_anarede():
         (27, 30, 32.02, 60.27, 0.0, 0), (28, 27, 0.0, 39.6, 0.0, 0.968),
         (29, 30, 23.99, 45.33, 0.0, 0)
     ]
-    s_base = 100.0
+    
     for branch in branches_data:
         f, t, r_pct, x_pct, mvar_ch, tap = branch
         vn_kv = net.bus.at[f, 'vn_kv']
-        z_base = (vn_kv**2) / s_base
+        z_base = (vn_kv**2) / 100.0
         r_ohm = (r_pct / 100.0) * z_base
         x_ohm = (x_pct / 100.0) * z_base
         
@@ -190,36 +210,19 @@ def create_ieee30_anarede():
             vk_pct = np.sqrt(r_pct**2 + x_pct**2)
             
             # --- MODELAGEM COM TAP CHANGER ---
-            # Target: Tap 0.932 (ou seja, 93.2% da tensão nominal).
-            # Se Neutral = 0 e Step = 1%, então Pos = -6.8.
-            # Método mais simples: Definir step = desvio exato e usar pos = 1 (ou -1).
-            
-            # Se tap < 1.0, estamos reduzindo tensão. Se tap > 1.0, aumentando.
-            # Vamos assumir que o Tap Changer está no lado HV.
-            # Ratio = 1 + (pos)*step/100.
-            # Se tap = 0.932 -> 0.932 = 1 + pos*step/100 -> pos*step = -6.8
-            
-            # Implementação: Step positivo, Posição negativa.
             step_pct = abs(tap - 1.0) * 100.0
-            
-            if step_pct < 0.001: # Nominal (Tap ~ 1.0)
+            if step_pct < 0.001:
                 tap_pos = 0
-                tap_step = 1.0 # Dummy
+                tap_step = 1.0
             else:
                 tap_pos = -1 if tap < 1.0 else 1
                 tap_step = step_pct
 
             pp.create_transformer_from_parameters(net, hv_bus=f, lv_bus=t, sn_mva=100, 
-                vn_hv_kv=net.bus.at[f, 'vn_kv'], # Tensão NOMINAL da barra
+                vn_hv_kv=net.bus.at[f, 'vn_kv'],
                 vn_lv_kv=net.bus.at[t, 'vn_kv'],
                 vkr_percent=r_pct, vk_percent=vk_pct, pfe_kw=0, i0_percent=0,
-                
-                # Configuração do Tap Changer
-                tap_pos=tap_pos, 
-                tap_neutral=0, 
-                tap_step_percent=tap_step, 
-                tap_side="hv", # Padrão ANAREDE
-                
+                tap_pos=tap_pos, tap_neutral=0, tap_step_percent=tap_step, tap_side="hv",
                 name=f"Trafo-{f}-{t}"
             )
         else:
