@@ -4,79 +4,42 @@ import os
 
 def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
     """
-    Gera um arquivo .pwf formatado como ANAREDE, incluindo os resultados
-    de P e Q dos geradores para validação fiel.
+    Gera um arquivo .pwf formatado como ANAREDE.
+    ATUALIZADO: Agora lê corretamente Taps modelados via Tap Changer.
     """
-    CONFIG = {
-        'load_scaling_bus_id': None, 
-        'enforce_q_lims': False,      
-        'distributed_slack': True,    
-        'max_scale': 5.0,             
-        'steps': 0.002,                
-        'min_step': 0.0005,
-        'max_iters': 2000,
-        'max_failures': 15,
-        
-        # NOVOS PARÂMETROS SOLVER
-        'solver_max_iter': 20,  # Dá mais tempo para convergir no nariz
-        'solver_tol': 0.1      # Tolerância padrão (pode relaxar para 1e-5 se estiver muito difícil)
-    }
-
-    # Tenta rodar para ter resultados atualizados, mas não trava se falhar
-    try:
-        pp.runpp(net, enforce_q_lims=CONFIG['enforce_q_lims'], 
-                     init="flat", 
-                     max_iteration=CONFIG['solver_max_iter'], 
-                     tolerance_mva=CONFIG['solver_tol'])
-    except:
-        pass # Exporta com os valores de entrada (setpoints) se não convergir
+    try: pp.runpp(net); 
+    except: pass
 
     s_base = 100.0
     
     with open(filename, 'w') as f:
         f.write("TITU\n")
-        f.write("VALIDACAO IEEE 30 - GERADO POR PYTHON (COM RESULTADOS)\n")
+        f.write("VALIDACAO IEEE 30 - MODELAGEM VIA TAP CHANGER\n")
         f.write("DBAR\n")
         f.write("(Num)OETGb(    nome    )Gl( V)( A)( Pg)( Qg)( Qn)( Qm)(Bc  )( Pl)( Ql)\n")
         
         for idx in sorted(net.bus.index):
             row = net.bus.loc[idx]
+            num, nome = idx, str(row['name'])[:12]
             
-            # Dados Básicos
-            num = idx
-            nome = str(row['name'])[:12]
-            
-            # Tenta pegar do resultado (pós-fluxo), senão usa o setpoint (entrada)
             if not net.res_bus.empty and idx in net.res_bus.index:
-                v_pu = net.res_bus.at[idx, 'vm_pu']
-                ang = net.res_bus.at[idx, 'va_degree']
+                v_pu, ang = net.res_bus.at[idx, 'vm_pu'], net.res_bus.at[idx, 'va_degree']
             else:
-                v_pu = row['vm_pu']
-                ang = 0.0
+                v_pu, ang = row['vm_pu'], 0.0
             
             v_int = int(v_pu * 1000)
-            
             pl = ql = pg = qg = qmin = qmax = bc = 0.0
             tipo = "L "
             
-            # Cargas
             loads = net.load[net.load.bus == idx]
-            if not loads.empty:
-                pl = loads.p_mw.sum()
-                ql = loads.q_mvar.sum()
-                
-            # Shunts (Invertendo sinal: PWF Bc+ é capacitor, PP q_mvar- é capacitor)
+            if not loads.empty: pl = loads.p_mw.sum(); ql = loads.q_mvar.sum()
             shunts = net.shunt[net.shunt.bus == idx]
-            if not shunts.empty:
-                bc = -shunts.q_mvar.sum()
+            if not shunts.empty: bc = -shunts.q_mvar.sum()
 
-            # Geradores e Slack
             slacks = net.ext_grid[net.ext_grid.bus == idx]
             if not slacks.empty:
-                tipo = "L2" # Slack
-                qmin = slacks.iloc[0].min_q_mvar
-                qmax = slacks.iloc[0].max_q_mvar
-                # Resultados da Slack
+                tipo = "L2" 
+                qmin, qmax = slacks.iloc[0].min_q_mvar, slacks.iloc[0].max_q_mvar
                 if not net.res_ext_grid.empty:
                     res_idx = slacks.index[0]
                     pg = net.res_ext_grid.at[res_idx, 'p_mw']
@@ -84,21 +47,14 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
                 
             gens = net.gen[net.gen.bus == idx]
             if not gens.empty:
-                if tipo == "L ": tipo = "L1" # PV
-                qmin += gens.min_q_mvar.sum()
-                qmax += gens.max_q_mvar.sum()
-                
+                if tipo == "L ": tipo = "L1" 
+                qmin += gens.min_q_mvar.sum(); qmax += gens.max_q_mvar.sum()
                 if not net.res_gen.empty:
-                    # Pega do resultado
                     for gen_i in gens.index:
-                        pg += net.res_gen.at[gen_i, 'p_mw']
-                        qg += net.res_gen.at[gen_i, 'q_mvar']
+                        pg += net.res_gen.at[gen_i, 'p_mw']; qg += net.res_gen.at[gen_i, 'q_mvar']
                 else:
-                    # Pega da entrada (setpoint)
-                    pg += gens.p_mw.sum()
-                    qg += gens.q_mvar.sum() # Agora temos esse valor na entrada!
+                    pg += gens.p_mw.sum(); qg += gens.q_mvar.sum()
 
-            # Formatação
             qmin_str = f"{int(qmin)}" if abs(qmin) > 9000 else f"{qmin:.1f}"
             qmax_str = f"{int(qmax)}" if abs(qmax) > 9000 else f"{qmax:.1f}"
             
@@ -107,7 +63,6 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
                     f"{bc:>6.1f} {pl:>6.1f} {ql:>6.1f}\n")
             f.write(line)
             
-        # --- DLIN ---
         f.write("DLIN\n")
         f.write("(De )d O d(Pa )NcEP ( R% )( X% )(Mvar)(Tap)(Tmn)(Tmx)(Phs)(Bc  )(Cn)(Ce)Ns\n")
         
@@ -115,73 +70,65 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
             fr, to = row.from_bus, row.to_bus
             vn = net.bus.at[fr, 'vn_kv']
             z_base = (vn**2) / 100.0
-            
             r_pct = (row.r_ohm_per_km * row.length_km / z_base) * 100
             x_pct = (row.x_ohm_per_km * row.length_km / z_base) * 100
-            
             w = 2 * np.pi * 60
             b_siemens = (row.c_nf_per_km * row.length_km * 1e-9) * w
-            mvar_ch = b_siemens * (vn**2) 
-            
+            mvar_ch = b_siemens * (vn**2)
             f.write(f"{fr:>5} {to:>5}   1      {r_pct:>6.2f} {x_pct:>6.2f} {mvar_ch:>6.2f}\n")
             
         for i, row in net.trafo.iterrows():
             hv, lv = row.hv_bus, row.lv_bus
             r_pct = row.vkr_percent
             xp = np.sqrt(max(0, row.vk_percent**2 - r_pct**2))
-            f.write(f"{hv:>5} {lv:>5}   1      {r_pct:>6.2f} {xp:>6.2f}   0.00  1.000\n")
+            
+            # CÁLCULO DO TAP REAL (Considerando Tap Changer)
+            # Fórmula: Ratio = 1 + (pos - neutral) * step/100
+            if not np.isnan(row.tap_pos):
+                step = row.tap_step_percent
+                pos = row.tap_pos
+                neutral = row.tap_neutral
+                tap_final = 1 + (pos - neutral) * (step / 100.0)
+            else:
+                # Fallback para método antigo (Vn/Vn)
+                vn_base_hv = net.bus.at[hv, 'vn_kv']
+                tap_final = row.vn_hv_kv / vn_base_hv
+
+            f.write(f"{hv:>5} {lv:>5}   1      {r_pct:>6.2f} {xp:>6.2f}   0.00  {tap_final:.3f}\n")
             
         f.write("99999\nFIM\n")
-    
-    print(f"  -> Arquivo PWF gerado para conferência: {filename}")
+    print(f"  -> Arquivo PWF (Tap Changer) gerado: {filename}")
 
 
 def create_ieee30_anarede():
     """
-    Cria o sistema IEEE 30 Barras exatamente conforme o PWF do ANAREDE.
+    Cria o sistema IEEE 30 Barras usando Tap Changers para os transformadores.
     """
     net = pp.create_empty_network()
     
-    # --- 1. BARRAMENTOS E SHUNTS ---
+    # 1. BARRAS
     buses_data = [
-        (1, 132, "Glen-Lyn", 2, 1.060, 0.0, 0.0),
-        (2, 132, "Claytor", 1, 1.043, -5.0, 0.0),
-        (3, 132, "Kumis", 0, 1.021, -7.0, 0.0),
-        (4, 132, "Hancock", 0, 1.012, -9.0, 0.0),
-        (5, 132, "Fieldale", 1, 1.010, -14.0, 0.0),
-        (6, 132, "Roanoke", 0, 1.010, -11.0, 0.0),
-        (7, 132, "Blaine", 0, 1.002, -13.0, 0.0),
-        (8, 132, "Reusens", 1, 1.010, -12.0, 0.0),
-        (9, 132, "ZRoanoke", 0, 1.051, -14.0, 0.0),
-        (10, 33, "TRoanoke", 0, 1.045, -15.0, 19.0),
-        (11, 11, "SRoanoke", 1, 1.082, -14.0, 0.0),
-        (12, 33, "THancock", 0, 1.057, -15.0, 0.0),
-        (13, 11, "SHancock", 1, 1.071, -15.0, 0.0),
-        (14, 33, "Barra14", 0, 1.042, -16.0, 0.0),
-        (15, 33, "Barra15", 0, 1.038, -16.0, 0.0),
-        (16, 33, "Barra16", 0, 1.045, -15.0, 0.0),
-        (17, 33, "Barra17", 0, 1.040, -16.0, 0.0),
-        (18, 33, "Barra18", 0, 1.028, -16.0, 0.0),
-        (19, 33, "Barra19", 0, 1.026, -17.0, 0.0),
-        (20, 33, "Barra20", 0, 1.030, -16.0, 0.0),
-        (21, 33, "Barra21", 0, 1.033, -16.0, 0.0),
-        (22, 33, "Barra22", 0, 1.033, -16.0, 0.0),
-        (23, 33, "Barra23", 0, 1.027, -16.0, 0.0),
-        (24, 33, "Barra24", 0, 1.021, -16.0, 4.3),
-        (25, 33, "Barra25", 0, 1.017, -16.0, 0.0),
-        (26, 33, "Barra26", 0, 1.000, -16.0, 0.0),
-        (27, 33, "TCloverdle", 0, 1.023, -15.0, 0.0),
-        (28, 132, "ACloverdle", 0, 1.007, -11.0, 0.0),
-        (29, 33, "Barra29", 0, 1.003, -17.0, 0.0),
-        (30, 33, "Barra30", 0, 0.992, -17.0, 0.0)
+        (1, 132, "Glen-Lyn", 2, 1.060, 0.0, 0.0), (2, 132, "Claytor", 1, 1.043, -5.0, 0.0),
+        (3, 132, "Kumis", 0, 1.021, -7.0, 0.0), (4, 132, "Hancock", 0, 1.012, -9.0, 0.0),
+        (5, 132, "Fieldale", 1, 1.010, -14.0, 0.0), (6, 132, "Roanoke", 0, 1.010, -11.0, 0.0),
+        (7, 132, "Blaine", 0, 1.002, -13.0, 0.0), (8, 132, "Reusens", 1, 1.010, -12.0, 0.0),
+        (9, 132, "ZRoanoke", 0, 1.051, -14.0, 0.0), (10, 33, "TRoanoke", 0, 1.045, -15.0, 19.0),
+        (11, 11, "SRoanoke", 1, 1.082, -14.0, 0.0), (12, 33, "THancock", 0, 1.057, -15.0, 0.0),
+        (13, 11, "SHancock", 1, 1.071, -15.0, 0.0), (14, 33, "Barra14", 0, 1.042, -16.0, 0.0),
+        (15, 33, "Barra15", 0, 1.038, -16.0, 0.0), (16, 33, "Barra16", 0, 1.045, -15.0, 0.0),
+        (17, 33, "Barra17", 0, 1.040, -16.0, 0.0), (18, 33, "Barra18", 0, 1.028, -16.0, 0.0),
+        (19, 33, "Barra19", 0, 1.026, -17.0, 0.0), (20, 33, "Barra20", 0, 1.030, -16.0, 0.0),
+        (21, 33, "Barra21", 0, 1.033, -16.0, 0.0), (22, 33, "Barra22", 0, 1.033, -16.0, 0.0),
+        (23, 33, "Barra23", 0, 1.027, -16.0, 0.0), (24, 33, "Barra24", 0, 1.021, -16.0, 4.3),
+        (25, 33, "Barra25", 0, 1.017, -16.0, 0.0), (26, 33, "Barra26", 0, 1.000, -16.0, 0.0),
+        (27, 33, "TCloverdle", 0, 1.023, -15.0, 0.0), (28, 132, "ACloverdle", 0, 1.007, -11.0, 0.0),
+        (29, 33, "Barra29", 0, 1.003, -17.0, 0.0), (30, 33, "Barra30", 0, 0.992, -17.0, 0.0)
     ]
-
     for b in buses_data:
         pp.create_bus(net, index=b[0], vn_kv=b[1], name=b[2], vm_pu=b[4], type="b")
-        if b[6] > 0:
-            pp.create_shunt(net, bus=b[0], q_mvar=-b[6], p_mw=0, name=f"Cap-{b[0]}")
+        if b[6] > 0: pp.create_shunt(net, bus=b[0], q_mvar=-b[6], p_mw=0, name=f"Cap-{b[0]}")
 
-    # --- 2. CARGAS ---
+    # 2. CARGAS
     loads_data = [
         (2, 21.7, 12.7), (3, 2.4, 1.2), (4, 7.6, 1.6), (5, 94.2, 19.0),
         (7, 22.8, 10.9), (8, 30.0, 30.0), (10, 5.8, 2.0), (12, 11.2, 7.5),
@@ -190,37 +137,19 @@ def create_ieee30_anarede():
         (23, 3.2, 1.6), (24, 8.7, 6.7), (26, 3.5, 2.3), (29, 2.4, 0.9),
         (30, 10.6, 1.9)
     ]
-    for l in loads_data:
-        pp.create_load(net, bus=l[0], p_mw=l[1], q_mvar=l[2])
+    for l in loads_data: pp.create_load(net, bus=l[0], p_mw=l[1], q_mvar=l[2])
 
-    # --- 3. GERADORES E SLACK ---
-    # Slack (Barra 1)
-    pp.create_ext_grid(
-        net, bus=1, vm_pu=1.060, va_degree=0.0, 
-        min_q_mvar=-9999, max_q_mvar=9999, name="Glen-Lyn-Ref"
-    )
-    
-    # Outros PVs (Adicionado q_mvar_ini na tupla)
-    # (Bus, P_mw, V_set, Q_min, Q_max, Q_ini_PWF)
+    # 3. GERADORES
+    pp.create_ext_grid(net, bus=1, vm_pu=1.060, min_q_mvar=-9999, max_q_mvar=9999, name="Glen-Lyn-Ref")
     gens_data = [
-        (2,  40.0, 1.043, -40.0, 50.0, 50.0),
-        (5,   0.0, 1.010, -40.0, 40.0, 37.0),
-        (8,   0.0, 1.010, -10.0, 40.0, 37.3),
-        (11,  0.0, 1.082,  -6.0, 24.0, 16.2),
-        (13,  0.0, 1.071,  -6.0, 24.0, 10.6)
+        (2, 40.0, 1.043, -40.0, 50.0, 50.0), (5, 0.0, 1.010, -40.0, 40.0, 37.0),
+        (8, 0.0, 1.010, -10.0, 40.0, 37.3), (11, 0.0, 1.082, -6.0, 24.0, 16.2),
+        (13, 0.0, 1.071, -6.0, 24.0, 10.6)
     ]
     for g in gens_data:
-        pp.create_gen(
-            net, bus=g[0], 
-            p_mw=g[1], 
-            vm_pu=g[2], 
-            min_q_mvar=g[3], 
-            max_q_mvar=g[4],
-            q_mvar=g[5], # Definindo Q inicial
-            name=f"Gen-{g[0]}"
-        )
+        pp.create_gen(net, bus=g[0], p_mw=g[1], vm_pu=g[2], min_q_mvar=g[3], max_q_mvar=g[4], q_mvar=g[5], name=f"Gen-{g[0]}")
 
-    # --- 4. LINHAS ---
+    # 4. RAMOS
     branches_data = [
         (1, 2, 1.92, 5.75, 5.28, 0), (1, 3, 4.52, 16.52, 4.08, 0),
         (2, 4, 5.70, 17.37, 3.68, 0), (2, 5, 4.72, 19.83, 4.18, 0),
@@ -259,15 +188,44 @@ def create_ieee30_anarede():
         
         if tap > 0:
             vk_pct = np.sqrt(r_pct**2 + x_pct**2)
+            
+            # --- MODELAGEM COM TAP CHANGER ---
+            # Target: Tap 0.932 (ou seja, 93.2% da tensão nominal).
+            # Se Neutral = 0 e Step = 1%, então Pos = -6.8.
+            # Método mais simples: Definir step = desvio exato e usar pos = 1 (ou -1).
+            
+            # Se tap < 1.0, estamos reduzindo tensão. Se tap > 1.0, aumentando.
+            # Vamos assumir que o Tap Changer está no lado HV.
+            # Ratio = 1 + (pos)*step/100.
+            # Se tap = 0.932 -> 0.932 = 1 + pos*step/100 -> pos*step = -6.8
+            
+            # Implementação: Step positivo, Posição negativa.
+            step_pct = abs(tap - 1.0) * 100.0
+            
+            if step_pct < 0.001: # Nominal (Tap ~ 1.0)
+                tap_pos = 0
+                tap_step = 1.0 # Dummy
+            else:
+                tap_pos = -1 if tap < 1.0 else 1
+                tap_step = step_pct
+
             pp.create_transformer_from_parameters(net, hv_bus=f, lv_bus=t, sn_mva=100, 
-                vn_hv_kv=net.bus.at[f, 'vn_kv'], vn_lv_kv=net.bus.at[t, 'vn_kv'],
+                vn_hv_kv=net.bus.at[f, 'vn_kv'], # Tensão NOMINAL da barra
+                vn_lv_kv=net.bus.at[t, 'vn_kv'],
                 vkr_percent=r_pct, vk_percent=vk_pct, pfe_kw=0, i0_percent=0,
-                tap_pos=0, tap_neutral=0, tap_step_percent=0, name=f"Trafo-{f}-{t}")
+                
+                # Configuração do Tap Changer
+                tap_pos=tap_pos, 
+                tap_neutral=0, 
+                tap_step_percent=tap_step, 
+                tap_side="hv", # Padrão ANAREDE
+                
+                name=f"Trafo-{f}-{t}"
+            )
         else:
             pp.create_line_from_parameters(net, from_bus=f, to_bus=t, length_km=1.0,
                 r_ohm_per_km=r_ohm, x_ohm_per_km=x_ohm, c_nf_per_km=c_nf, max_i_ka=1.0,
                 name=f"Line-{f}-{t}")
 
     export_pwf_anarede(net, "validacao_ieee30_gerado.pwf")
-    
     return net
