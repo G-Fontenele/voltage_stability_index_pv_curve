@@ -95,6 +95,7 @@ def main():
         
         log_step(1, f"Inicialização: {system_name}")
         net = case_func()
+        bus_count = len(net.bus)
         
         # Ajuste apenas se for o caso padrão (o ANAREDE já vem ajustado)
         if "IEEE 30" in system_name and "ANAREDE" not in system_name:
@@ -122,7 +123,7 @@ def main():
 
         # 2. Exportação do PWF (Registro do Caso)
         log_step(2, "Exportando Rede (PWF)")
-        pwf_name = f"{case_folder_name}_base.pwf"
+        pwf_name = f"{case_folder_name}_base_{bus_count}.pwf"
         pwf_path = os.path.join(network_dir, pwf_name)
         try:
             cs.export_pwf_anarede(net, pwf_path)
@@ -132,8 +133,8 @@ def main():
 
         # 3. Relatório Inicial
         log_step(3, "Gerando Relatório do Caso Base")
-        rep_initial = os.path.join(reports_dir, "relatorio_inicial_base.txt")
-        tools.generate_initial_report(net, system_name, rep_initial)
+        rep_initial = os.path.join(reports_dir, f"relatorio_inicial_base_{bus_count}.txt")
+        tools.generate_initial_report(net, system_name, rep_initial, bus_count=bus_count)
 
         # 4. Matrizes
         log_step(4, "Pré-Cálculo de Matrizes")
@@ -171,27 +172,27 @@ def main():
             df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
             all_results[pct] = df
             try:
-                csv_name = f"resultados_indices_cenario_{pct}.csv"
+                csv_name = f"resultados_indices_cenario_{pct}_{bus_count}.csv"
                 df.to_csv(os.path.join(sheets_dir, csv_name), index=False)
             except: pass
 
         # 7. Gráficos
         log_step(7, "Geração de Gráficos")
         try:
-            tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir)
-            tools.plot_comparative_indices(all_results, save_dir=figures_dir)
+            tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir, bus_count=bus_count)
+            tools.plot_comparative_indices(all_results, save_dir=figures_dir, bus_count=bus_count)
         except Exception as e: print(f"Erro gráfico: {e}")
 
         # 8. Relatórios Finais
         log_step(8, "Gerando Relatórios Finais")
-        rep_col = os.path.join(reports_dir, "relatorio_colapso.txt")
-        rep_conv = os.path.join(reports_dir, "relatorio_convergencia.txt")
+        rep_col = os.path.join(reports_dir, f"relatorio_colapso_{bus_count}.txt")
+        rep_conv = os.path.join(reports_dir, f"relatorio_convergencia_{bus_count}.txt")
         
-        tools.generate_anarede_report(history, system_name, rep_col)
+        tools.generate_anarede_report(history, system_name, rep_col, bus_count=bus_count)
         
         # 9. Finalização
         log_step(9, "Finalizando Caso")
-        tools.generate_convergence_report(full_log, system_name, rep_conv)
+        tools.generate_convergence_report(full_log, system_name, rep_conv, bus_count=bus_count)
 
     # --- FIM GERAL ---
     total_elapsed = time.time() - start_time

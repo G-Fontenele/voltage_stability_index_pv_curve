@@ -180,7 +180,7 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
 
 # --- 3. PLOTAGEM (PADRÃO IEEE - SVG) ---
 
-def plot_pv_curves(history, title="Curvas PV", save_dir="."):
+def plot_pv_curves(history, title="Curvas PV", save_dir=".", bus_count=0):
     set_ieee_style()
     p_total = [snap['total_load_mw'] for snap in history]
     vm_data = [snap['res_bus']['vm_pu'].values for snap in history]
@@ -207,12 +207,13 @@ def plot_pv_curves(history, title="Curvas PV", save_dir="."):
     # Legenda fora do gráfico, à direita
     plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.)
     
-    filename = os.path.join(save_dir, "curva_pv_sistema.svg")
+    suffix = f"_{bus_count}" if bus_count > 0 else ""
+    filename = os.path.join(save_dir, f"curva_pv_sistema{suffix}.svg")
     plt.savefig(filename)
     plt.close()
-    print(f"  -> Gráfico PV (SVG) salvo com legenda externa.")
+    print(f"  -> Gráfico PV (SVG) salvo com sufixo {suffix}.")
 
-def plot_comparative_indices(all_scenarios_results, save_dir="."):
+def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
     set_ieee_style()
     first_key = list(all_scenarios_results.keys())[0]
     all_cols = all_scenarios_results[first_key].columns
@@ -224,6 +225,8 @@ def plot_comparative_indices(all_scenarios_results, save_dir="."):
     cmap = plt.cm.get_cmap('turbo')
     colors = [cmap(i) for i in np.linspace(0.1, 0.9, len(scenario_keys))]
     
+    suffix = f"_{bus_count}" if bus_count > 0 else ""
+
     for ind_name in indices_cols:
         plt.figure(figsize=(5.5, 3.5)) # Dimensão aumentada para acomodar legenda externa
         is_bus_index = ind_name in bus_indices_names
@@ -254,15 +257,15 @@ def plot_comparative_indices(all_scenarios_results, save_dir="."):
         # Legenda fora do gráfico, à direita
         plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
             
-        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}.svg')
+        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')
         plt.savefig(filename)
         plt.close()
-    print(f"  -> Gráficos de Índices (SVG) salvos com legendas externas.")
+    print(f"  -> Gráficos de Índices (SVG) salvos com sufixo {suffix}.")
 
 
 # --- 4. RELATÓRIOS TXT ---
 
-def generate_initial_report(net, system_name, filepath):
+def generate_initial_report(net, system_name, filepath, bus_count=0):
     try: pp.runpp(net)
     except: pass
     header = f"""
@@ -287,10 +290,12 @@ BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
         if bus_id in net.gen.bus.values or bus_id in net.ext_grid.bus.values: b_type = "PV/REF"
         content += f"{bus_id:<7} | {row['vm_pu']:<7.4f} | {row['va_degree']:<9.2f} | {row['p_mw']:<10.2f} | {row['q_mvar']:<12.2f} | {b_type}\n"
     content += f"\n{'='*80}\n"
+
+    # Ajusta o nome do arquivo se necessário (main já deve passar o caminho com sufixo)
     with open(filepath, "w") as f: f.write(content)
     print(f"  -> Relatório Inicial salvo: {filepath}")
 
-def generate_anarede_report(history, system_name, filepath):
+def generate_anarede_report(history, system_name, filepath, bus_count=0):
     snap = history[-1]
     res_bus = snap['res_bus']
     res_line = snap.get('res_line', pd.DataFrame())
@@ -334,7 +339,7 @@ BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar)
     with open(filepath, "w") as f: f.write(content)
     print(f"  -> Relatório de Colapso salvo em: {filepath}")
 
-def generate_convergence_report(full_log, system_name, filepath):
+def generate_convergence_report(full_log, system_name, filepath, bus_count=0):
     header = f"""
 X----X----------------X--------------------------X-------------------------X---------X
                                AUMENTO DA CARGA                           
