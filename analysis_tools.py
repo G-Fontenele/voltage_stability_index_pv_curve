@@ -32,7 +32,7 @@ def set_ieee_style():
 
 # --- 1. PRÉ-CÁLCULO DE MATRIZES ---
 def pre_calculate_matrices(net):
-    """Calcula matrizes estáticas (Ybus e F) e parâmetros de linha p.u."""
+    """Calcula matrizes estáticas (Ybus e F) e parâmetros de ramos p.u. (Linhas e Trafos)"""
     print("  -> Pré-calculando matrizes e parâmetros estáticos de rede...")
     
     try:
@@ -45,7 +45,7 @@ def pre_calculate_matrices(net):
         Ybus = net._ppc['internal']['Ybus']
         bus_lookup = net._pd2ppc_lookups['bus']
     except:
-        return {'Ybus': None, 'F_matrix': None, 'bus_to_idx': {}, 'idx_gen': [], 'idx_load': [], 'load_buses_ids': [], 'line_params': {}}
+        return {'Ybus': None, 'F_matrix': None, 'bus_to_idx': {}, 'idx_gen': [], 'idx_load': [], 'load_buses_ids': [], 'branch_params': {}}
     
     bus_to_idx = {ext_id: int(bus_lookup[ext_id]) for ext_id in net.bus.index if ext_id in bus_lookup}
             
@@ -63,63 +63,130 @@ def pre_calculate_matrices(net):
         try: F_matrix = -inv(Y_LL).dot(Y_LG)
         except: print("AVISO: Matriz Y_LL singular.")
 
-    # Parâmetros de Linha p.u.
     s_base = 100.0
-    line_data = net.line[net.line.in_service]
-    from_buses = line_data.from_bus.values
-    vn_kv = net.bus.loc[from_buses, 'vn_kv'].values
-    z_base = (vn_kv ** 2) / s_base
-    R_pu = (line_data.r_ohm_per_km.values * line_data.length_km.values) / z_base
-    X_pu = (line_data.x_ohm_per_km.values * line_data.length_km.values) / z_base
-    Z_pu, theta = vsi.get_line_params(R_pu, X_pu)
     
-    line_params = {
-        'indices': line_data.index.values,
-        'from_bus': from_buses,
-        'to_bus': line_data.to_bus.values,
-        'R_pu': R_pu, 'X_pu': X_pu, 'Z_pu': Z_pu, 'theta': theta
+    # 1. Parâmetros de Linha
+    line_data = net.line[net.line.in_service]
+    from_buses_l = line_data.from_bus.values
+    to_buses_l = line_data.to_bus.values
+    vn_kv_l = net.bus.loc[from_buses_l, 'vn_kv'].values
+    z_base_l = (vn_kv_l ** 2) / s_base
+    R_pu_l = (line_data.r_ohm_per_km.values * line_data.length_km.values) / z_base_l
+    X_pu_l = (line_data.x_ohm_per_km.values * line_data.length_km.values) / z_base_l
+    branch_type_l = np.array(['LINE'] * len(line_data))
+    branch_id_l = line_data.index.values
+
+    # 2. Parâmetros de Transformador
+    trafo_data = net.trafo[net.trafo.in_service]
+    from_buses_t = trafo_data.hv_bus.values
+    to_buses_t = trafo_data.lv_bus.values
+    R_pu_t = (trafo_data.vkr_percent.values / 100.0) * (s_base / trafo_data.sn_mva.values)
+    Z_pu_t = (trafo_data.vk_percent.values / 100.0) * (s_base / trafo_data.sn_mva.values)
+    X_pu_t = np.sqrt(np.maximum(0, Z_pu_t**2 - R_pu_t**2))
+    branch_type_t = np.array(['TRAFO'] * len(trafo_data))
+    branch_id_t = trafo_data.index.values
+
+    # 3. Unificação
+    all_from = np.concatenate([from_buses_l, from_buses_t])
+    all_to = np.concatenate([to_buses_l, to_buses_t])
+    all_R = np.concatenate([R_pu_l, R_pu_t])
+    all_X = np.concatenate([X_pu_l, X_pu_t])
+    all_types = np.concatenate([branch_type_l, branch_type_t])
+    all_ids = np.concatenate([branch_id_l, branch_id_t])
+    
+    Z_pu, theta = vsi.get_line_params(all_R, all_X)
+    
+    branch_params = {
+        'indices': all_ids,
+        'from_bus': all_from,
+        'to_bus': all_to,
+        'R_pu': all_R, 'X_pu': all_X, 'Z_pu': Z_pu, 'theta': theta,
+        'type': all_types
     }
 
     return {
         'Ybus': Ybus, 'F_matrix': F_matrix, 'bus_to_idx': bus_to_idx, 
         'idx_gen': idx_gen_int, 'idx_load': idx_load_int, 
-        'load_buses_ids': valid_load_buses, 'line_params': line_params
+        'load_buses_ids': valid_load_buses, 'branch_params': branch_params
     }
 
 # --- 2. CÁLCULO DOS ÍNDICES (VETORIZADO) ---
 def calculate_indices_for_scenario(snapshot, static_matrices):
     res_bus = snapshot['res_bus']
     res_line = snapshot['res_line']
-    lp = static_matrices['line_params']
+    res_trafo = snapshot['res_trafo']
+    bp = static_matrices['branch_params']
     
-    if not static_matrices['bus_to_idx'] or not lp: return pd.DataFrame()
+    if not static_matrices['bus_to_idx'] or not bp: return pd.DataFrame(), pd.DataFrame()
     
-    # 2.1 Tensões Complexas e Mapas Globais
+    # --- 2.1 RELATÓRIO DE BARRAS (COMPLETO) ---
     ybus_size = static_matrices['Ybus'].shape[0]
     V_complex = np.zeros(ybus_size, dtype=complex)
-    for ext_id, int_idx in static_matrices['bus_to_idx'].items():
-        if ext_id in res_bus.index:
-            vm = res_bus.at[ext_id, 'vm_pu']
-            va = np.radians(res_bus.at[ext_id, 'va_degree'])
-            V_complex[int_idx] = vm * np.exp(1j * va)
-        
-    # 2.2 Índices de Barra (L-index, VCPI_bus)
-    l_index_map = {}
-    if static_matrices['F_matrix'] is not None:
-        L_vals = vsi.calculate_l_index_vectorized(V_complex, static_matrices['F_matrix'], static_matrices['idx_gen'], static_matrices['idx_load'])
-        l_index_map = dict(zip(static_matrices['load_buses_ids'], L_vals))
-            
-    vcpi_bus_vals = vsi.calculate_vcpi_bus_vectorized(V_complex, static_matrices['Ybus'])
     idx_int_to_ext = {v: k for k, v in static_matrices['bus_to_idx'].items()}
-    vcpi_map = {idx_int_to_ext[i]: val for i, val in enumerate(vcpi_bus_vals) if i in idx_int_to_ext}
-
-    # 2.3 Extração Vetorizada de Dados das Linhas
-    line_idx = lp['indices']
-    mask = np.isin(line_idx, res_line.index)
-    line_idx = line_idx[mask]
     
-    from_b = lp['from_bus'][mask]
-    to_b = lp['to_bus'][mask]
+    bus_ids = sorted(list(static_matrices['bus_to_idx'].keys()))
+    vm_vals = res_bus.loc[bus_ids, 'vm_pu'].values
+    va_vals = res_bus.loc[bus_ids, 'va_degree'].values
+    
+    for ext_id in bus_ids:
+        int_idx = static_matrices['bus_to_idx'][ext_id]
+        vm = res_bus.at[ext_id, 'vm_pu']
+        va = np.radians(res_bus.at[ext_id, 'va_degree'])
+        V_complex[int_idx] = vm * np.exp(1j * va)
+
+    # L-index
+    l_index_vals = np.zeros(len(bus_ids))
+    if static_matrices['F_matrix'] is not None:
+        L_vector = vsi.calculate_l_index_vectorized(V_complex, static_matrices['F_matrix'], static_matrices['idx_gen'], static_matrices['idx_load'])
+        l_map = dict(zip(static_matrices['load_buses_ids'], L_vector))
+        l_index_vals = np.array([l_map.get(b, 0.0) for b in bus_ids])
+
+    # VCPI_bus
+    vcpi_bus_full = vsi.calculate_vcpi_bus_vectorized(V_complex, static_matrices['Ybus'])
+    vcpi_bus_vals = np.array([vcpi_bus_full[static_matrices['bus_to_idx'][b]] for b in bus_ids])
+
+    bus_df = pd.DataFrame({
+        'Bus_ID': bus_ids,
+        'V_pu': vm_vals,
+        'Angle_deg': va_vals,
+        'L_index': l_index_vals,
+        'VCPI_bus': vcpi_bus_vals
+    })
+
+    # --- 2.2 RELATÓRIO DE RAMOS (LINHAS + TRAFOS) ---
+    # Extração de Fluxos Unificada
+    p_from = []
+    q_from = []
+    p_to = []
+    q_to = []
+    
+    for i, b_type in enumerate(bp['type']):
+        b_idx = bp['indices'][i]
+        if b_type == 'LINE':
+            if b_idx in res_line.index:
+                p_from.append(res_line.at[b_idx, 'p_from_mw'])
+                q_from.append(res_line.at[b_idx, 'q_from_mvar'])
+                p_to.append(res_line.at[b_idx, 'p_to_mw'])
+                q_to.append(res_line.at[b_idx, 'q_to_mvar'])
+            else:
+                p_from.append(0.0); q_from.append(0.0); p_to.append(0.0); q_to.append(0.0)
+        else: # TRAFO
+            if b_idx in res_trafo.index:
+                p_from.append(res_trafo.at[b_idx, 'p_hv_mw'])
+                q_from.append(res_trafo.at[b_idx, 'q_hv_mvar'])
+                p_to.append(res_trafo.at[b_idx, 'p_lv_mw'])
+                q_to.append(res_trafo.at[b_idx, 'q_lv_mvar'])
+            else:
+                p_from.append(0.0); q_from.append(0.0); p_to.append(0.0); q_to.append(0.0)
+
+    s_base = 100.0
+    p_from = np.array(p_from) / s_base
+    q_from = np.array(q_from) / s_base
+    p_to = np.array(p_to) / s_base
+    q_to = np.array(q_to) / s_base
+    
+    from_b = bp['from_bus']
+    to_b = bp['to_bus']
     
     # Tensões e Ângulos
     V_from = res_bus.loc[from_b, 'vm_pu'].values
@@ -127,14 +194,7 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
     Va_from = np.radians(res_bus.loc[from_b, 'va_degree'].values)
     Va_to = np.radians(res_bus.loc[to_b, 'va_degree'].values)
     
-    # Fluxos (p.u.)
-    s_base = 100.0
-    p_from = res_line.loc[line_idx, 'p_from_mw'].values / s_base
-    q_from = res_line.loc[line_idx, 'q_from_mvar'].values / s_base
-    p_to = res_line.loc[line_idx, 'p_to_mw'].values / s_base
-    q_to = res_line.loc[line_idx, 'q_to_mvar'].values / s_base
-    
-    # Sentido do Fluxo: Se p_from >= 0, From=Source, To=Receiver
+    # Sentido do Fluxo
     is_fwd = p_from >= 0
     V_s = np.where(is_fwd, V_from, V_to)
     V_r = np.where(is_fwd, V_to, V_from)
@@ -144,12 +204,12 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
     Q_r = np.where(is_fwd, np.abs(q_to), np.abs(q_from))
     P_s = np.where(is_fwd, np.abs(p_from), np.abs(p_to))
     
-    R_pu, X_pu, Z_pu, theta = lp['R_pu'][mask], lp['X_pu'][mask], lp['Z_pu'][mask], lp['theta'][mask]
+    R_pu, X_pu, Z_pu, theta = bp['R_pu'], bp['X_pu'], bp['Z_pu'], bp['theta']
     _, phi = vsi.get_load_params(P_r, Q_r)
 
-    # 2.4 Cálculos Vetorizados em Massa
-    results_df = pd.DataFrame({
-        'Line_ID': line_idx, 'From': np.where(is_fwd, from_b, to_b), 'To': np.where(is_fwd, to_b, from_b),
+    branch_df = pd.DataFrame({
+        'Branch_ID': bp['indices'], 'Type': bp['type'], 
+        'From': np.where(is_fwd, from_b, to_b), 'To': np.where(is_fwd, to_b, from_b),
         'FVSI': vsi.calculate_fvsi(V_s, X_pu, Q_r, Z_pu),
         'Lmn': vsi.calculate_lmn(V_s, X_pu, Q_r, theta, delta),
         'LQP': vsi.calculate_lqp(V_s, X_pu, Q_r, P_s),
@@ -171,11 +231,13 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
         'VSI_1': vsi.calculate_vsi1(V_s, P_r, Q_r, X_pu)
     })
 
-    # Mapeamento de Índices de Barra para o DataFrame de Linhas (usando o Receiver 'To')
-    results_df['L_index'] = results_df['To'].map(l_index_map).fillna(0.0)
-    results_df['VCPI_bus'] = results_df['To'].map(vcpi_map).fillna(0.0)
+    # Mapeamento para o DataFrame de Ramos
+    l_map = dict(zip(bus_df['Bus_ID'], bus_df['L_index']))
+    vcpi_map = dict(zip(bus_df['Bus_ID'], bus_df['VCPI_bus']))
+    branch_df['L_index'] = branch_df['To'].map(l_map).fillna(0.0)
+    branch_df['VCPI_bus'] = branch_df['To'].map(vcpi_map).fillna(0.0)
 
-    return results_df
+    return branch_df, bus_df
 
 
 # --- 3. PLOTAGEM (PADRÃO IEEE - SVG) ---
@@ -216,8 +278,10 @@ def plot_pv_curves(history, title="Curvas PV", save_dir=".", bus_count=0):
 def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
     set_ieee_style()
     first_key = list(all_scenarios_results.keys())[0]
+    # Pega apenas os resultados de ramos (o primeiro elemento da tupla em snapshots futuros ou o DataFrame atual)
+    # Na verdade, main.py vai passar apenas o branch_df para esta função.
     all_cols = all_scenarios_results[first_key].columns
-    indices_cols = [c for c in all_cols if c not in ['Line_ID', 'From', 'To']]
+    indices_cols = [c for c in all_cols if c not in ['Branch_ID', 'Type', 'From', 'To']]
     bus_indices_names = ['L_index', 'VCPI_bus'] 
     scenario_keys = sorted(list(all_scenarios_results.keys()))
     
@@ -228,9 +292,8 @@ def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
     suffix = f"_{bus_count}" if bus_count > 0 else ""
 
     for ind_name in indices_cols:
-        plt.figure(figsize=(5.5, 3.5)) # Dimensão aumentada para acomodar legenda externa
+        plt.figure(figsize=(5.5, 3.5))
         is_bus_index = ind_name in bus_indices_names
-        marker = 's' if is_bus_index else 'o' # Quadrados para Barras, Círculos para Linhas
         
         limit = 1.0
         if ind_name in ['SI', 'VCPI_1', 'VSMI', 'VSI_1']: limit = 0.0
@@ -242,19 +305,21 @@ def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
             if is_bus_index:
                 df_plot = df_clean[['To', ind_name]].drop_duplicates(subset=['To'])
                 x_data, y_data = df_plot['To'], df_plot[ind_name]
+                marker = 's'
             else:
                 df_plot = df_clean[df_clean[ind_name] < 5.0]
-                x_data, y_data = df_plot['Line_ID'], df_plot[ind_name]
+                # Para ramos, vamos diferenciar Line de Trafo no plot? 
+                # Por simplificação, manteremos o Branch_ID.
+                x_data, y_data = df_plot['Branch_ID'], df_plot[ind_name]
+                marker = 'o'
 
             if not y_data.empty:
                 plt.scatter(x_data, y_data, label=f'{pct}%', 
                             marker=marker, color=colors[i], s=20, alpha=0.8)
 
-        plt.xlabel('Bus ID' if is_bus_index else 'Line ID')
+        plt.xlabel('Bus ID' if is_bus_index else 'Branch ID')
         plt.ylabel(f'{ind_name} Value')
         plt.axhline(y=limit, color='black', linestyle=':', linewidth=1.0)
-        
-        # Legenda fora do gráfico, à direita
         plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
             
         filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')

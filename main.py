@@ -85,8 +85,8 @@ def main():
         'min_step': 0.00001,
         'max_iters': 2000,
         'max_failures': 15,
-        'solver_max_iter': 20,
-        'solver_tol': 0.1
+        'solver_max_iter': 50,
+        'solver_tol': 1e-6
     }
     print(f"Parâmetros Globais: {CONFIG}")
 
@@ -109,7 +109,7 @@ def main():
         figures_dir = os.path.join(base_output_dir, "index_figures")
         pv_dir = os.path.join(base_output_dir, "pv_figures")
         reports_dir = os.path.join(base_output_dir, "reports")
-        network_dir = os.path.join(base_output_dir, "network") # <--- NOVA PASTA
+        network_dir = os.path.join(base_output_dir, "network")
         
         if os.path.exists(base_output_dir):
             try: shutil.rmtree(base_output_dir)
@@ -119,7 +119,7 @@ def main():
         os.makedirs(figures_dir, exist_ok=True)
         os.makedirs(pv_dir, exist_ok=True)
         os.makedirs(reports_dir, exist_ok=True)
-        os.makedirs(network_dir, exist_ok=True) # <--- CRIA PASTA NETWORK
+        os.makedirs(network_dir, exist_ok=True)
 
         # 2. Exportação do PWF (Registro do Caso)
         log_step(2, "Exportando Rede (PWF)")
@@ -166,21 +166,25 @@ def main():
         # 6. Extração e Tabelas
         log_step(6, "Extração e Tabelas")
         scenarios = sim.extract_scenarios(history, [0, 25, 50, 75, 95, 99, 100])
-        all_results = {} 
+        branch_results_scenarios = {} 
         
         for pct, snapshot in scenarios.items():
-            df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
-            all_results[pct] = df
+            branch_df, bus_df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
+            branch_results_scenarios[pct] = branch_df
             try:
-                csv_name = f"resultados_indices_cenario_{pct}_{bus_count}.csv"
-                df.to_csv(os.path.join(sheets_dir, csv_name), index=False)
+                # Salva Ramos
+                csv_branch = f"resultados_indices_ramos_{pct}_{bus_count}.csv"
+                branch_df.to_csv(os.path.join(sheets_dir, csv_branch), index=False)
+                # Salva Barras
+                csv_bus = f"resultados_indices_barras_{pct}_{bus_count}.csv"
+                bus_df.to_csv(os.path.join(sheets_dir, csv_bus), index=False)
             except: pass
 
         # 7. Gráficos
         log_step(7, "Geração de Gráficos")
         try:
             tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir, bus_count=bus_count)
-            tools.plot_comparative_indices(all_results, save_dir=figures_dir, bus_count=bus_count)
+            tools.plot_comparative_indices(branch_results_scenarios, save_dir=figures_dir, bus_count=bus_count)
         except Exception as e: print(f"Erro gráfico: {e}")
 
         # 8. Relatórios Finais
