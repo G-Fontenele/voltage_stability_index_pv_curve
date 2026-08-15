@@ -46,8 +46,8 @@ def calculate_nlsi(V_s, P_r, R, Q_r, X):
 def calculate_nvsi(V_s, X, P_r, Q_r):
     S_r = np.sqrt(P_r**2 + Q_r**2)
     with np.errstate(divide='ignore', invalid='ignore'):
-        denom = (2 * Q_r * X - V_s**2)
-        val = np.abs((2 * X * S_r) / denom)
+        denom = (V_s**2 - 2 * Q_r * X)
+        val = (2 * X * S_r) / denom
     return np.where(np.isfinite(val), val, np.nan)
 
 def calculate_vsli(V_s, V_r, delta):

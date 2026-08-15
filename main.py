@@ -101,9 +101,9 @@ def main():
         if "IEEE 30" in system_name and "ANAREDE" not in system_name:
             adjust_generator_participation(net)
         
-        # Preparação de Pastas
+        # Preparação de Pastas (Preservando baseline histórico)
         case_folder_name = system_name.replace(' ', '_').replace('(', '').replace(')', '').lower()
-        base_output_dir = os.path.join("outputs", case_folder_name)
+        base_output_dir = os.path.join("outputs_revised", case_folder_name)
         
         sheets_dir = os.path.join(base_output_dir, "index_sheets")
         figures_dir = os.path.join(base_output_dir, "index_figures")
@@ -167,10 +167,12 @@ def main():
         log_step(6, "Extração e Tabelas")
         scenarios = sim.extract_scenarios(history, [0, 25, 50, 75, 95, 99, 100])
         branch_results_scenarios = {} 
+        bus_results_scenarios = {}
         
         for pct, snapshot in scenarios.items():
             branch_df, bus_df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
             branch_results_scenarios[pct] = branch_df
+            bus_results_scenarios[pct] = bus_df
             try:
                 # Salva Ramos
                 csv_branch = f"resultados_indices_ramos_{pct}_{bus_count}.csv"
@@ -184,7 +186,7 @@ def main():
         log_step(7, "Geração de Gráficos")
         try:
             tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir, bus_count=bus_count)
-            tools.plot_comparative_indices(branch_results_scenarios, save_dir=figures_dir, bus_count=bus_count)
+            tools.plot_comparative_indices(branch_results_scenarios, bus_results_scenarios, save_dir=figures_dir, bus_count=bus_count)
         except Exception as e: print(f"Erro gráfico: {e}")
 
         # 8. Relatórios Finais

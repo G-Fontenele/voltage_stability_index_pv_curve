@@ -47,7 +47,14 @@ def pre_calculate_matrices(net):
     except:
         return {'Ybus': None, 'F_matrix': None, 'bus_to_idx': {}, 'idx_gen': [], 'idx_load': [], 'load_buses_ids': [], 'branch_params': {}}
     
-    bus_to_idx = {ext_id: int(bus_lookup[ext_id]) for ext_id in net.bus.index if ext_id in bus_lookup}
+    bus_to_idx = {}
+    for ext_id in net.bus.index:
+        try:
+            internal_idx = int(bus_lookup[ext_id])
+            if internal_idx >= 0:
+                bus_to_idx[ext_id] = internal_idx
+        except (IndexError, KeyError):
+            pass
             
     gen_buses_ext = list(set(net.gen.bus.values.tolist() + net.ext_grid.bus.values.tolist()))
     valid_load_buses = [b for b in net.bus.index if b not in gen_buses_ext and b in bus_to_idx]
@@ -200,9 +207,11 @@ def calculate_indices_for_scenario(snapshot, static_matrices):
     V_r = np.where(is_fwd, V_to, V_from)
     delta = np.where(is_fwd, Va_from - Va_to, Va_to - Va_from)
     
-    P_r = np.where(is_fwd, np.abs(p_to), np.abs(p_from))
-    Q_r = np.where(is_fwd, np.abs(q_to), np.abs(q_from))
-    P_s = np.where(is_fwd, np.abs(p_from), np.abs(p_to))
+    # Convencao Pandapower: p_from/p_to e fluxo injetado no ramo.
+    # A potencia entregue ao barramento receptor e o negativo do fluxo injetado pelo terminal.
+    P_r = np.where(is_fwd, -p_to, -p_from)
+    Q_r = np.where(is_fwd, -q_to, -q_from)
+    P_s = np.where(is_fwd, p_from, p_to)
     
     R_pu, X_pu, Z_pu, theta = bp['R_pu'], bp['X_pu'], bp['Z_pu'], bp['theta']
     _, phi = vsi.get_load_params(P_r, Q_r)
@@ -275,15 +284,17 @@ def plot_pv_curves(history, title="Curvas PV", save_dir=".", bus_count=0):
     plt.close()
     print(f"  -> Gráfico PV (SVG) salvo com sufixo {suffix}.")
 
-def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
+def plot_comparative_indices(branch_scenarios, bus_scenarios, save_dir=".", bus_count=0):
     set_ieee_style()
-    first_key = list(all_scenarios_results.keys())[0]
-    # Pega apenas os resultados de ramos (o primeiro elemento da tupla em snapshots futuros ou o DataFrame atual)
-    # Na verdade, main.py vai passar apenas o branch_df para esta função.
-    all_cols = all_scenarios_results[first_key].columns
-    indices_cols = [c for c in all_cols if c not in ['Branch_ID', 'Type', 'From', 'To']]
-    bus_indices_names = ['L_index', 'VCPI_bus'] 
-    scenario_keys = sorted(list(all_scenarios_results.keys()))
+    first_key = list(branch_scenarios.keys())[0]
+    
+    branch_cols = branch_scenarios[first_key].columns
+    bus_cols = bus_scenarios[first_key].columns
+    
+    branch_indices = [c for c in branch_cols if c not in ['Branch_ID', 'Type', 'From', 'To', 'L_index', 'VCPI_bus']]
+    bus_indices = [c for c in bus_cols if c not in ['Bus_ID', 'V_pu', 'Angle_deg']]
+    
+    scenario_keys = sorted(list(branch_scenarios.keys()))
     
     # Paleta de cores por percentual
     cmap = plt.cm.get_cmap('turbo')
@@ -291,33 +302,22 @@ def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
     
     suffix = f"_{bus_count}" if bus_count > 0 else ""
 
-    for ind_name in indices_cols:
+    # 1. Plotar Índices de Ramo
+    for ind_name in branch_indices:
         plt.figure(figsize=(5.5, 3.5))
-        is_bus_index = ind_name in bus_indices_names
-        
         limit = 1.0
         if ind_name in ['SI', 'VCPI_1', 'VSMI', 'VSI_1']: limit = 0.0
         
         for i, pct in enumerate(scenario_keys):
-            df = all_scenarios_results[pct]
+            df = branch_scenarios[pct]
             df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[ind_name])
+            df_plot = df_clean[df_clean[ind_name] < 5.0]
             
-            if is_bus_index:
-                df_plot = df_clean[['To', ind_name]].drop_duplicates(subset=['To'])
-                x_data, y_data = df_plot['To'], df_plot[ind_name]
-                marker = 's'
-            else:
-                df_plot = df_clean[df_clean[ind_name] < 5.0]
-                # Para ramos, vamos diferenciar Line de Trafo no plot? 
-                # Por simplificação, manteremos o Branch_ID.
-                x_data, y_data = df_plot['Branch_ID'], df_plot[ind_name]
-                marker = 'o'
-
+            x_data, y_data = df_plot['Branch_ID'], df_plot[ind_name]
             if not y_data.empty:
-                plt.scatter(x_data, y_data, label=f'{pct}%', 
-                            marker=marker, color=colors[i], s=20, alpha=0.8)
+                plt.scatter(x_data, y_data, label=f'{pct}%', marker='o', color=colors[i], s=20, alpha=0.8)
 
-        plt.xlabel('Bus ID' if is_bus_index else 'Branch ID')
+        plt.xlabel('Branch ID')
         plt.ylabel(f'{ind_name} Value')
         plt.axhline(y=limit, color='black', linestyle=':', linewidth=1.0)
         plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
@@ -325,6 +325,29 @@ def plot_comparative_indices(all_scenarios_results, save_dir=".", bus_count=0):
         filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')
         plt.savefig(filename)
         plt.close()
+
+    # 2. Plotar Índices Nodais
+    for ind_name in bus_indices:
+        plt.figure(figsize=(5.5, 3.5))
+        limit = 1.0
+        
+        for i, pct in enumerate(scenario_keys):
+            df = bus_scenarios[pct]
+            df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=[ind_name])
+            
+            x_data, y_data = df_clean['Bus_ID'], df_clean[ind_name]
+            if not y_data.empty:
+                plt.scatter(x_data, y_data, label=f'{pct}%', marker='s', color=colors[i], s=20, alpha=0.8)
+
+        plt.xlabel('Bus ID')
+        plt.ylabel(f'{ind_name} Value')
+        plt.axhline(y=limit, color='black', linestyle=':', linewidth=1.0)
+        plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
+            
+        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')
+        plt.savefig(filename)
+        plt.close()
+
     print(f"  -> Gráficos de Índices (SVG) salvos com sufixo {suffix}.")
 
 
