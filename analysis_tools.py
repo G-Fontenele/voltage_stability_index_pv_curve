@@ -55,8 +55,9 @@ def pre_calculate_matrices(net):
                 bus_to_idx[ext_id] = internal_idx
         except (IndexError, KeyError):
             pass
-            
-    gen_buses_ext = list(set(net.gen.bus.values.tolist() + net.ext_grid.bus.values.tolist()))
+    active_gens = net.gen[net.gen.in_service]
+    active_ext = net.ext_grid[net.ext_grid.in_service]
+    gen_buses_ext = list(set(active_gens.bus.values.tolist() + active_ext.bus.values.tolist()))
     valid_load_buses = [b for b in net.bus.index if b not in gen_buses_ext and b in bus_to_idx]
     valid_gen_buses = [b for b in gen_buses_ext if b in bus_to_idx]
     
@@ -67,7 +68,10 @@ def pre_calculate_matrices(net):
     if idx_load_int:
         Y_LL = Ybus[idx_load_int, :][:, idx_load_int]
         Y_LG = Ybus[idx_load_int, :][:, idx_gen_int]
-        try: F_matrix = -inv(Y_LL).dot(Y_LG)
+        try: 
+            Y_LL_dense = Y_LL.toarray() if hasattr(Y_LL, 'toarray') else Y_LL
+            Y_LG_dense = Y_LG.toarray() if hasattr(Y_LG, 'toarray') else Y_LG
+            F_matrix = -np.linalg.inv(Y_LL_dense).dot(Y_LG_dense)
         except: print("AVISO: Matriz Y_LL singular.")
 
     s_base = 100.0
@@ -118,7 +122,9 @@ def pre_calculate_matrices(net):
     }
 
 # --- 2. CÁLCULO DOS ÍNDICES (VETORIZADO) ---
-def calculate_indices_for_scenario(snapshot, static_matrices):
+def calculate_indices_for_scenario(snapshot, default_matrices):
+    static_matrices = snapshot.get('static_matrices', default_matrices)
+    
     res_bus = snapshot['res_bus']
     res_line = snapshot['res_line']
     res_trafo = snapshot['res_trafo']
@@ -462,3 +468,49 @@ X----X----------------X--------------------------X-------------------------X----
     content += f"X----X----------------X--------------------------X-------------------------X---------X\n"
     with open(filepath, "w") as f: f.write(content)
     print(f"  -> Relatório de Convergência salvo em: {filepath}")
+
+def generate_correlation_reports(branch_df, bus_df, save_dir, bus_count=0):
+    """Calcula matrizes de correlação de Spearman e Kendall Tau para os índices no ponto de colapso."""
+    suffix = f"_{bus_count}" if bus_count > 0 else ""
+    
+    # --- BARRAS ---
+    bus_cols = ['V_pu', 'Angle_deg', 'L_index', 'VCPI_bus']
+    # Mantem apenas colunas numéricas disponíveis
+    bus_cols = [c for c in bus_cols if c in bus_df.columns]
+    bus_df_clean = bus_df[bus_cols].copy()
+    bus_df_clean = bus_df_clean.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if not bus_df_clean.empty and len(bus_df_clean) > 1:
+        corr_spearman_bus = bus_df_clean.corr(method='spearman')
+        corr_kendall_bus = bus_df_clean.corr(method='kendall')
+        
+        corr_spearman_bus.to_csv(os.path.join(save_dir, f"correlacao_spearman_barras{suffix}.csv"))
+        corr_kendall_bus.to_csv(os.path.join(save_dir, f"correlacao_kendall_barras{suffix}.csv"))
+    
+    # --- RAMOS ---
+    branch_cols_to_drop = ['Branch_ID', 'Type', 'From', 'To']
+    branch_df_clean = branch_df.drop(columns=[c for c in branch_cols_to_drop if c in branch_df.columns])
+    branch_df_clean = branch_df_clean.replace([np.inf, -np.inf], np.nan).dropna()
+    
+    if not branch_df_clean.empty and len(branch_df_clean) > 1:
+        corr_spearman_branch = branch_df_clean.corr(method='spearman')
+        corr_kendall_branch = branch_df_clean.corr(method='kendall')
+        
+        corr_spearman_branch.to_csv(os.path.join(save_dir, f"correlacao_spearman_ramos{suffix}.csv"))
+        corr_kendall_branch.to_csv(os.path.join(save_dir, f"correlacao_kendall_ramos{suffix}.csv"))
+        
+        try:
+            set_ieee_style()
+            plt.figure(figsize=(7, 6))
+            plt.imshow(corr_spearman_branch.values, cmap='coolwarm', vmin=-1, vmax=1, aspect='auto')
+            plt.colorbar(label='Spearman Correlation')
+            plt.xticks(range(len(corr_spearman_branch.columns)), corr_spearman_branch.columns, rotation=90)
+            plt.yticks(range(len(corr_spearman_branch.index)), corr_spearman_branch.index)
+            plt.title('Spearman Rank Correlation - Line VSIs (Collapse Point)')
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f"heatmap_spearman_ramos{suffix}.svg"))
+            plt.close()
+        except Exception as e:
+            print(f"Erro ao gerar heatmap de correlação: {e}")
+            
+    print(f"  -> Matrizes de Correlação (Spearman/Kendall) geradas em {save_dir}.")

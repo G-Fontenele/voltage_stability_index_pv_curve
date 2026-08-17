@@ -45,6 +45,13 @@ def select_system():
     elif choice in systems: return [systems[choice]]
     else: return [systems["2"]]
 
+def select_mode():
+    print("\nMODO DE OPERAÇÃO:")
+    print("  [1] N-0 (Apenas Caso Base)")
+    print("  [2] N-1 (Todas as Contingências de Linha)")
+    choice = input("\nDigite a opção desejada (1-2): ").strip()
+    return choice == "2"
+
 def adjust_generator_participation(net):
     """Ajusta o despacho inicial do Gerador 2 para 13.3% (Apenas IEEE 30 Padrão)."""
     print("\n--- AJUSTE FINO DE DESPACHO (TCC Madureira) ---")
@@ -74,6 +81,7 @@ def main():
     print_intro()
     
     systems_to_run = select_system()
+    run_n1 = select_mode()
     
     # --- CONFIGURAÇÃO DE ALTA PRECISÃO ---
     CONFIG = {
@@ -97,118 +105,152 @@ def main():
         net = case_func()
         bus_count = len(net.bus)
         
-        # Ajuste apenas se for o caso padrão (o ANAREDE já vem ajustado)
+        # Ajuste apenas se for o caso padrão
         if "IEEE 30" in system_name and "ANAREDE" not in system_name:
             adjust_generator_participation(net)
         
-        # Preparação de Pastas (Preservando baseline histórico)
         case_folder_name = system_name.replace(' ', '_').replace('(', '').replace(')', '').lower()
         base_output_dir = os.path.join("outputs_revised", case_folder_name)
-        
-        sheets_dir = os.path.join(base_output_dir, "index_sheets")
-        figures_dir = os.path.join(base_output_dir, "index_figures")
-        pv_dir = os.path.join(base_output_dir, "pv_figures")
-        reports_dir = os.path.join(base_output_dir, "reports")
-        network_dir = os.path.join(base_output_dir, "network")
         
         if os.path.exists(base_output_dir):
             try: shutil.rmtree(base_output_dir)
             except: pass
             
-        os.makedirs(sheets_dir, exist_ok=True)
-        os.makedirs(figures_dir, exist_ok=True)
-        os.makedirs(pv_dir, exist_ok=True)
-        os.makedirs(reports_dir, exist_ok=True)
-        os.makedirs(network_dir, exist_ok=True)
-
-        # 2. Exportação do PWF (Registro do Caso)
-        log_step(2, "Exportando Rede (PWF)")
-        pwf_name = f"{case_folder_name}_base_{bus_count}.pwf"
-        pwf_path = os.path.join(network_dir, pwf_name)
-        try:
-            cs.export_pwf_anarede(net, pwf_path)
-            print(f"  -> Rede salva em: {pwf_path}")
-        except Exception as e:
-            print(f"Aviso: Falha ao exportar PWF ({e})")
-
-        # 3. Relatório Inicial
-        log_step(3, "Gerando Relatório do Caso Base")
-        rep_initial = os.path.join(reports_dir, f"relatorio_inicial_base_{bus_count}.txt")
-        tools.generate_initial_report(net, system_name, rep_initial, bus_count=bus_count)
-
-        # 4. Matrizes
-        log_step(4, "Pré-Cálculo de Matrizes")
-        try: static_matrices = tools.pre_calculate_matrices(net)
-        except Exception as e: 
-            print(f"Erro fatal na topologia: {e}")
-            continue
-
-        # 5. Execução CPF
-        log_step(5, "Executando Fluxo de Potência Continuado")
-        history, full_log = sim.run_continuation_process(
-            net, 
-            load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
-            max_scale=CONFIG['max_scale'],
-            initial_step=CONFIG['steps'],
-            min_step=CONFIG['min_step'],
-            max_iters=CONFIG['max_iters'],
-            max_failures=CONFIG['max_failures'],
-            enforce_q_lims=CONFIG['enforce_q_lims'],
-            distributed_slack=CONFIG['distributed_slack'],
-            solver_max_iter=CONFIG['solver_max_iter'],
-            solver_tol=CONFIG['solver_tol']
-        )
+        print(f"\n=== EXECUTANDO CASO BASE (N-0) ===")
+        max_scale_base = run_scenario(net, system_name, base_output_dir, bus_count, CONFIG, scenario_name="base")
         
-        if not history: 
-            print(f"Aviso: {system_name} não convergiu. Pulando...")
-            continue
+        if run_n1:
+            print(f"\n{'='*80}")
+            print(f" INICIANDO ANÁLISE N-1 PARA {system_name}")
+            print(f"{'='*80}")
+            
+            contingency_dir = os.path.join(base_output_dir, "contingencies")
+            os.makedirs(contingency_dir, exist_ok=True)
+            
+            ranking = []
+            import copy
+            import pandas as pd
+            
+            for branch_idx in net.line.index:
+                print(f"\n---> Testando Contingência: Linha {branch_idx}...")
+                net_cont = copy.deepcopy(net)
+                net_cont.line.at[branch_idx, 'in_service'] = False
+                
+                cont_output_dir = os.path.join(contingency_dir, f"line_{branch_idx}")
+                try:
+                    max_scale_cont = run_scenario(net_cont, f"{system_name} (S/ L{branch_idx})", cont_output_dir, bus_count, CONFIG, scenario_name=f"cont_L{branch_idx}")
+                    if max_scale_cont is not None:
+                        ranking.append({'Linha': branch_idx, 'Lambda_Max': max_scale_cont})
+                except Exception as e:
+                    print(f"Erro na contingência da linha {branch_idx}: {e}")
+            
+            if ranking:
+                df_ranking = pd.DataFrame(ranking)
+                df_ranking = df_ranking.sort_values(by='Lambda_Max').reset_index(drop=True)
+                ranking_path = os.path.join(contingency_dir, "ranking_contingencias.csv")
+                df_ranking.to_csv(ranking_path, index=False)
+                
+                pior_caso = df_ranking.iloc[0]
+                print(f"\n*** PIOR CASO N-1 ENCONTRADO: Linha {int(pior_caso['Linha'])} com Lambda Max = {pior_caso['Lambda_Max']:.4f} ***")
+                
+                # Copiar os gráficos do pior caso para evidenciar o colapso precoce
+                worst_case_dir = os.path.join(base_output_dir, "worst_case_analysis")
+                os.makedirs(worst_case_dir, exist_ok=True)
+                
+                src_worst_cont = os.path.join(contingency_dir, f"line_{int(pior_caso['Linha'])}")
+                if os.path.exists(src_worst_cont):
+                    for folder in ['index_figures', 'pv_figures', 'reports']:
+                        src_folder = os.path.join(src_worst_cont, folder)
+                        dst_folder = os.path.join(worst_case_dir, folder)
+                        if os.path.exists(src_folder):
+                            shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True)
+                            
+                print(f"Resultados do pior caso copiados para: {worst_case_dir}")
 
-        # 6. Extração e Tabelas
-        log_step(6, "Extração e Tabelas")
-        scenarios = sim.extract_scenarios(history, [0, 25, 50, 75, 95, 99, 100])
-        branch_results_scenarios = {} 
-        bus_results_scenarios = {}
-        
-        for pct, snapshot in scenarios.items():
-            branch_df, bus_df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
-            branch_results_scenarios[pct] = branch_df
-            bus_results_scenarios[pct] = bus_df
-            try:
-                # Salva Ramos
-                csv_branch = f"resultados_indices_ramos_{pct}_{bus_count}.csv"
-                branch_df.to_csv(os.path.join(sheets_dir, csv_branch), index=False)
-                # Salva Barras
-                csv_bus = f"resultados_indices_barras_{pct}_{bus_count}.csv"
-                bus_df.to_csv(os.path.join(sheets_dir, csv_bus), index=False)
-            except: pass
-
-        # 7. Gráficos
-        log_step(7, "Geração de Gráficos")
-        try:
-            tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir, bus_count=bus_count)
-            tools.plot_comparative_indices(branch_results_scenarios, bus_results_scenarios, save_dir=figures_dir, bus_count=bus_count)
-        except Exception as e: print(f"Erro gráfico: {e}")
-
-        # 8. Relatórios Finais
-        log_step(8, "Gerando Relatórios Finais")
-        rep_col = os.path.join(reports_dir, f"relatorio_colapso_{bus_count}.txt")
-        rep_conv = os.path.join(reports_dir, f"relatorio_convergencia_{bus_count}.txt")
-        
-        tools.generate_anarede_report(history, system_name, rep_col, bus_count=bus_count)
-        
-        # 9. Finalização
-        log_step(9, "Finalizando Caso")
-        tools.generate_convergence_report(full_log, system_name, rep_conv, bus_count=bus_count)
-
-    # --- FIM GERAL ---
     total_elapsed = time.time() - start_time
     mins, secs = int(total_elapsed // 60), total_elapsed % 60
 
     print(f"\n{'='*60}")
     print(f"BATERIA DE TESTES CONCLUÍDA!")
     print(f"Tempo Total: {mins}m {secs:.2f}s")
-    print(f"Resultados em: /outputs/")
+    print(f"Resultados em: /outputs_revised/")
     print(f"{'='*60}")
+
+def run_scenario(net, system_name, output_dir, bus_count, CONFIG, scenario_name="base"):
+    sheets_dir = os.path.join(output_dir, "index_sheets")
+    figures_dir = os.path.join(output_dir, "index_figures")
+    pv_dir = os.path.join(output_dir, "pv_figures")
+    reports_dir = os.path.join(output_dir, "reports")
+    network_dir = os.path.join(output_dir, "network")
+    
+    os.makedirs(sheets_dir, exist_ok=True)
+    os.makedirs(figures_dir, exist_ok=True)
+    os.makedirs(pv_dir, exist_ok=True)
+    os.makedirs(reports_dir, exist_ok=True)
+    os.makedirs(network_dir, exist_ok=True)
+
+    pwf_name = f"{scenario_name}_{bus_count}.pwf"
+    pwf_path = os.path.join(network_dir, pwf_name)
+    try: cs.export_pwf_anarede(net, pwf_path)
+    except: pass
+
+    rep_initial = os.path.join(reports_dir, f"relatorio_inicial_{scenario_name}_{bus_count}.txt")
+    tools.generate_initial_report(net, system_name, rep_initial, bus_count=bus_count)
+
+    try: static_matrices = tools.pre_calculate_matrices(net)
+    except Exception as e: 
+        print(f"Erro fatal na topologia: {e}")
+        return None
+
+    history, full_log = sim.run_continuation_process(
+        net, 
+        initial_static_matrices=static_matrices,
+        load_scaling_bus_id=CONFIG['load_scaling_bus_id'],
+        max_scale=CONFIG['max_scale'],
+        initial_step=CONFIG['steps'],
+        min_step=CONFIG['min_step'],
+        max_iters=CONFIG['max_iters'],
+        max_failures=CONFIG['max_failures'],
+        enforce_q_lims=CONFIG['enforce_q_lims'],
+        distributed_slack=CONFIG['distributed_slack'],
+        solver_max_iter=CONFIG['solver_max_iter'],
+        solver_tol=CONFIG['solver_tol']
+    )
+    
+    if not history: 
+        print(f"Aviso: Não convergiu. Pulando...")
+        return None
+
+    scenarios = sim.extract_scenarios(history, [0, 25, 50, 75, 95, 99, 100])
+    branch_results_scenarios = {} 
+    bus_results_scenarios = {}
+    
+    for pct, snapshot in scenarios.items():
+        branch_df, bus_df = tools.calculate_indices_for_scenario(snapshot, static_matrices)
+        branch_results_scenarios[pct] = branch_df
+        bus_results_scenarios[pct] = bus_df
+        try:
+            branch_df.to_csv(os.path.join(sheets_dir, f"resultados_indices_ramos_{pct}_{bus_count}.csv"), index=False)
+            bus_df.to_csv(os.path.join(sheets_dir, f"resultados_indices_barras_{pct}_{bus_count}.csv"), index=False)
+        except: pass
+
+    # Extrair Correlação Estatística (Spearman/Kendall) no ponto de colapso
+    if 100 in branch_results_scenarios and 100 in bus_results_scenarios:
+        tools.generate_correlation_reports(branch_results_scenarios[100], bus_results_scenarios[100], reports_dir, bus_count)
+
+    try:
+        tools.plot_pv_curves(history, title=f"Curva PV - {system_name}", save_dir=pv_dir, bus_count=bus_count)
+        tools.plot_comparative_indices(branch_results_scenarios, bus_results_scenarios, save_dir=figures_dir, bus_count=bus_count)
+    except Exception as e: print(f"Erro gráfico: {e}")
+
+    rep_col = os.path.join(reports_dir, f"relatorio_colapso_{scenario_name}_{bus_count}.txt")
+    rep_conv = os.path.join(reports_dir, f"relatorio_convergencia_{scenario_name}_{bus_count}.txt")
+    
+    tools.generate_anarede_report(history, system_name, rep_col, bus_count=bus_count)
+    tools.generate_convergence_report(full_log, system_name, rep_conv, bus_count=bus_count)
+
+    max_scale_found = history[-1]['scale'] if history else None
+    return max_scale_found
 
 if __name__ == "__main__":
     main()

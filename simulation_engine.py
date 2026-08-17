@@ -1,12 +1,12 @@
 import pandapower as pp
 import numpy as np
+import pandas as pd
 import copy
-
 # ==============================================================================
 # MOTOR DE SIMULAÇÃO (CPF) - CORRIGIDO COM SOLVER PARAMS
 # ==============================================================================
 
-def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0, 
+def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=None, max_scale=5.0, 
                              initial_step=0.1, min_step=0.001, 
                              max_iters=2000, max_failures=10,
                              enforce_q_lims=True, distributed_slack=True,
@@ -55,6 +55,10 @@ def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0,
     consecutive_failures = 0
     total_iterations = 0
 
+    converted_gens_sgen_idx = []
+    base_p_sgen = {}
+    current_matrices = copy.deepcopy(initial_static_matrices)
+
     # --- 4. Caso Base ---
     print(f" [...] Rodando Caso Base...")
     try:
@@ -62,7 +66,7 @@ def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0,
         pp.runpp(net_sim, enforce_q_lims=enforce_q_lims, 
                  max_iteration=solver_max_iter, tolerance_mva=solver_tol)
         
-        _save_snapshot(net_sim, 1.0, history)
+        _save_snapshot(net_sim, 1.0, history, current_matrices)
         _log_attempt(full_log, 0, 1.0, 0.0, "Convergente", net_sim)
         print(f"   -> Convergiu Base OK")
     except:
@@ -84,7 +88,13 @@ def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0,
         net_sim.load.loc[load_idx, 'p_mw'] = base_p_load * next_scale
         net_sim.load.loc[load_idx, 'q_mvar'] = base_q_load * next_scale
         if distributed_slack and not active_gen_idx.empty:
-            net_sim.gen.loc[active_gen_idx, 'p_mw'] = base_p_gen * next_scale
+            current_active_gen_idx = [idx for idx in active_gen_idx if net_sim.gen.at[idx, 'in_service']]
+            if current_active_gen_idx:
+                net_sim.gen.loc[current_active_gen_idx, 'p_mw'] = base_p_gen.loc[current_active_gen_idx] * next_scale
+            for s_idx in converted_gens_sgen_idx:
+                net_sim.sgen.at[s_idx, 'p_mw'] = base_p_sgen[s_idx] * next_scale
+
+        last_good_net = copy.deepcopy(net_sim)
 
         try:
             # --- SOLVER ROBUSTO ---
@@ -97,9 +107,45 @@ def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0,
                      max_iteration=solver_max_iter, 
                      tolerance_mva=solver_tol)
             
+            # --- VERIFICAÇÃO DE LIMITES Q ---
+            limits_violated = False
+            active_gens_now = net_sim.gen[net_sim.gen.in_service]
+            for g_idx, row in active_gens_now.iterrows():
+                q_out = net_sim.res_gen.at[g_idx, 'q_mvar']
+                q_max = row['max_q_mvar']
+                q_min = row['min_q_mvar']
+                
+                violated_val = None
+                if pd.notna(q_max) and q_out > q_max + 1e-4:
+                    violated_val = q_max
+                elif pd.notna(q_min) and q_out < q_min - 1e-4:
+                    violated_val = q_min
+                    
+                if violated_val is not None:
+                    limits_violated = True
+                    print(f"   [!] Gerador {g_idx} (Barra {int(row['bus'])}) violou limite Q: {q_out:.2f} Mvar. Convertendo para PQ...")
+                    
+                    net_sim = copy.deepcopy(last_good_net)
+                    net_sim.gen.at[g_idx, 'in_service'] = False
+                    
+                    p_val = base_p_gen[g_idx] * next_scale if (distributed_slack and g_idx in base_p_gen) else row['p_mw']
+                    
+                    sgen_idx = pp.create_sgen(net_sim, bus=row['bus'], p_mw=p_val, q_mvar=violated_val, name=f"Converted_Gen_{g_idx}")
+                    
+                    if distributed_slack and g_idx in base_p_gen:
+                        converted_gens_sgen_idx.append(sgen_idx)
+                        base_p_sgen[sgen_idx] = base_p_gen[g_idx]
+                        
+                    import analysis_tools as tools
+                    current_matrices = tools.pre_calculate_matrices(net_sim)
+                    break
+            
+            if limits_violated:
+                continue
+
             # Sucesso
             consecutive_failures = 0
-            _save_snapshot(net_sim, next_scale, history)
+            _save_snapshot(net_sim, next_scale, history, current_matrices)
             _log_attempt(full_log, total_iterations, next_scale, current_step, "Convergente", net_sim)
             
             p_tot = net_sim.res_load.p_mw.sum()
@@ -126,7 +172,7 @@ def run_continuation_process(net, load_scaling_bus_id=None, max_scale=5.0,
 
     return history, full_log
 
-def _save_snapshot(net, scale, history_list):
+def _save_snapshot(net, scale, history_list, static_matrices):
     snapshot = {
         'scale': scale,
         'total_load_mw': net.res_load.p_mw.sum(),
@@ -136,7 +182,8 @@ def _save_snapshot(net, scale, history_list):
         'res_trafo': net.res_trafo.copy(),
         'line_data': net.line.copy(),
         'trafo_data': net.trafo.copy(),
-        'bus_data': net.bus.copy()
+        'bus_data': net.bus.copy(),
+        'static_matrices': copy.deepcopy(static_matrices)
     }
     history_list.append(snapshot)
 
