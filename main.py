@@ -1,8 +1,11 @@
+import os
+import tempfile
+os.environ["NUMBA_CACHE_DIR"] = os.path.join(tempfile.gettempdir(), "numba_cache")
+
 import pandapower.networks as pn
 import pandapower as pp
 import simulation_engine as sim
 import analysis_tools as tools
-import os
 import shutil
 import sys
 import time
@@ -46,11 +49,20 @@ def select_system():
     else: return [systems["2"]]
 
 def select_mode():
-    print("\nMODO DE OPERAÇÃO:")
-    print("  [1] N-0 (Apenas Caso Base)")
-    print("  [2] N-1 (Todas as Contingências de Linha)")
-    choice = input("\nDigite a opção desejada (1-2): ").strip()
-    return choice == "2"
+    print("\n" + "="*50)
+    print(" MODO DE OPERAÇÃO:")
+    print("="*50)
+    print("  [1] N-0 (Apenas Caso Base, sem QLIM)")
+    print("  [2] N-0 com QLIM (Pandapower - enforce_q_lims)")
+    print("  [3] N-0 com QLIM (Agregação de PV para PQ)")
+    print("  [4] N-1 (Todas as Contingências de Linha - Sem QLIM)")
+    choice = input("\nEscolha a opção (1-4) [Padrão: 1]: ").strip()
+    
+    if choice == "4": return True, "none"
+    if choice == "3": return False, "pv_to_pq"
+    if choice == "2": return False, "pandapower"
+    
+    return False, "none"  # default
 
 def adjust_generator_participation(net):
     """Ajusta o despacho inicial do Gerador 2 para 13.3% (Apenas IEEE 30 Padrão)."""
@@ -81,20 +93,22 @@ def main():
     print_intro()
     
     systems_to_run = select_system()
-    run_n1 = select_mode()
+    run_n1, qlim_mode = select_mode()
     
     # --- CONFIGURAÇÃO DE ALTA PRECISÃO ---
     CONFIG = {
         'load_scaling_bus_id': None, 
-        'enforce_q_lims': False,      
+        'qlim_mode': qlim_mode,      
         'distributed_slack': True,    
         'max_scale': 5.0,             
         'steps': 0.002,                
         'min_step': 0.00001,
         'max_iters': 2000,
         'max_failures': 15,
-        'solver_max_iter': 50,
-        'solver_tol': 1e-6
+        # 'solver_max_iter': 50,
+        # 'solver_tol': 1e-6
+        'solver_max_iter': 20,
+        'solver_tol': 0.1
     }
     print(f"Parâmetros Globais: {CONFIG}")
 
@@ -110,7 +124,7 @@ def main():
             adjust_generator_participation(net)
         
         case_folder_name = system_name.replace(' ', '_').replace('(', '').replace(')', '').lower()
-        base_output_dir = os.path.join("outputs_revised", case_folder_name)
+        base_output_dir = os.path.join("outputs", case_folder_name)
         
         if os.path.exists(base_output_dir):
             try: shutil.rmtree(base_output_dir)
@@ -173,7 +187,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"BATERIA DE TESTES CONCLUÍDA!")
     print(f"Tempo Total: {mins}m {secs:.2f}s")
-    print(f"Resultados em: /outputs_revised/")
+    print(f"Resultados em: /outputs/")
     print(f"{'='*60}")
 
 def run_scenario(net, system_name, output_dir, bus_count, CONFIG, scenario_name="base"):
@@ -211,7 +225,7 @@ def run_scenario(net, system_name, output_dir, bus_count, CONFIG, scenario_name=
         min_step=CONFIG['min_step'],
         max_iters=CONFIG['max_iters'],
         max_failures=CONFIG['max_failures'],
-        enforce_q_lims=CONFIG['enforce_q_lims'],
+        qlim_mode=CONFIG['qlim_mode'],
         distributed_slack=CONFIG['distributed_slack'],
         solver_max_iter=CONFIG['solver_max_iter'],
         solver_tol=CONFIG['solver_tol']

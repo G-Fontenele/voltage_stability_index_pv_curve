@@ -9,7 +9,7 @@ import copy
 def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=None, max_scale=5.0, 
                              initial_step=0.1, min_step=0.001, 
                              max_iters=2000, max_failures=10,
-                             enforce_q_lims=True, distributed_slack=True,
+                             distributed_slack=True, qlim_mode='none',
                              # NOVOS PARÂMETROS DO SOLVER (NEWTON-RAPHSON)
                              solver_max_iter=50,  # Aumentado de 10 para 50 (Crucial perto do colapso)
                              solver_tol=1e-6):    # Tolerância de Mismatch (MVA)
@@ -25,9 +25,15 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
     print(f" CONFIGURAÇÃO DO SOLVER (NEWTON-RAPHSON):")
     print(f"  > Max Iterações:    {solver_max_iter} (Padrão PP=10)")
     print(f"  > Tolerância:       {solver_tol} MVA")
+    print(f" CONFIGURAÇÃO DE QLIM:")
+    print(f"  > Modo:             {qlim_mode}")
     print(f"{'='*80}\n")
 
     net_sim = copy.deepcopy(net)
+    
+    qlim_mode = str(qlim_mode).lower()
+    enforce_q_lims = (qlim_mode in ['pandapower', 'pv_to_pq'])
+    use_pv_to_pq = (qlim_mode == 'pv_to_pq')
     
     # --- 1. Identificação de Cargas ---
     if load_scaling_bus_id is None:
@@ -88,11 +94,14 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
         net_sim.load.loc[load_idx, 'p_mw'] = base_p_load * next_scale
         net_sim.load.loc[load_idx, 'q_mvar'] = base_q_load * next_scale
         if distributed_slack and not active_gen_idx.empty:
-            current_active_gen_idx = [idx for idx in active_gen_idx if net_sim.gen.at[idx, 'in_service']]
-            if current_active_gen_idx:
-                net_sim.gen.loc[current_active_gen_idx, 'p_mw'] = base_p_gen.loc[current_active_gen_idx] * next_scale
-            for s_idx in converted_gens_sgen_idx:
-                net_sim.sgen.at[s_idx, 'p_mw'] = base_p_sgen[s_idx] * next_scale
+            if use_pv_to_pq:
+                current_active_gen_idx = [idx for idx in active_gen_idx if net_sim.gen.at[idx, 'in_service']]
+                if current_active_gen_idx:
+                    net_sim.gen.loc[current_active_gen_idx, 'p_mw'] = base_p_gen.loc[current_active_gen_idx] * next_scale
+                for s_idx in converted_gens_sgen_idx:
+                    net_sim.sgen.at[s_idx, 'p_mw'] = base_p_sgen[s_idx] * next_scale
+            else:
+                net_sim.gen.loc[active_gen_idx, 'p_mw'] = base_p_gen.loc[active_gen_idx] * next_scale
 
         last_good_net = copy.deepcopy(net_sim)
 
@@ -109,36 +118,41 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
             
             # --- VERIFICAÇÃO DE LIMITES Q ---
             limits_violated = False
-            active_gens_now = net_sim.gen[net_sim.gen.in_service]
-            for g_idx, row in active_gens_now.iterrows():
-                q_out = net_sim.res_gen.at[g_idx, 'q_mvar']
-                q_max = row['max_q_mvar']
-                q_min = row['min_q_mvar']
-                
-                violated_val = None
-                if pd.notna(q_max) and q_out > q_max + 1e-4:
-                    violated_val = q_max
-                elif pd.notna(q_min) and q_out < q_min - 1e-4:
-                    violated_val = q_min
+            if use_pv_to_pq:
+                active_gens_now = net_sim.gen[net_sim.gen.in_service]
+                for g_idx, row in active_gens_now.iterrows():
+                    q_out = net_sim.res_gen.at[g_idx, 'q_mvar']
+                    q_max = row['max_q_mvar']
+                    q_min = row['min_q_mvar']
                     
-                if violated_val is not None:
-                    limits_violated = True
-                    print(f"   [!] Gerador {g_idx} (Barra {int(row['bus'])}) violou limite Q: {q_out:.2f} Mvar. Convertendo para PQ...")
-                    
-                    net_sim = copy.deepcopy(last_good_net)
-                    net_sim.gen.at[g_idx, 'in_service'] = False
-                    
-                    p_val = base_p_gen[g_idx] * next_scale if (distributed_slack and g_idx in base_p_gen) else row['p_mw']
-                    
-                    sgen_idx = pp.create_sgen(net_sim, bus=row['bus'], p_mw=p_val, q_mvar=violated_val, name=f"Converted_Gen_{g_idx}")
-                    
-                    if distributed_slack and g_idx in base_p_gen:
-                        converted_gens_sgen_idx.append(sgen_idx)
-                        base_p_sgen[sgen_idx] = base_p_gen[g_idx]
+                    violated_val = None
+                    if pd.notna(q_max) and q_out > q_max + 1e-4:
+                        violated_val = q_max
+                    elif pd.notna(q_min) and q_out < q_min - 1e-4:
+                        violated_val = q_min
                         
-                    import analysis_tools as tools
-                    current_matrices = tools.pre_calculate_matrices(net_sim)
-                    break
+                    if violated_val is not None:
+                        limits_violated = True
+                        print(f"   [!] Gerador {g_idx} (Barra {int(row['bus'])}) violou limite Q: {q_out:.2f} Mvar. Convertendo para PQ...")
+                        
+                        bus_idx = row['bus']
+                        p_mw = net_sim.res_gen.at[g_idx, 'p_mw']
+                        q_mvar = violated_val 
+                        
+                        net_sim.gen.at[g_idx, 'in_service'] = False
+                        
+                        sgen_idx = pp.create_sgen(net_sim, bus=bus_idx, p_mw=p_mw, q_mvar=q_mvar, 
+                                       name=f"SGen_from_Gen_{g_idx}")
+                        
+                        net_sim.bus.at[bus_idx, 'type'] = 'pq'
+                        
+                        if distributed_slack and g_idx in base_p_gen:
+                            converted_gens_sgen_idx.append(sgen_idx)
+                            base_p_sgen[sgen_idx] = base_p_gen[g_idx]
+                        
+                        import analysis_tools as tools
+                        current_matrices = tools.pre_calculate_matrices(net_sim)
+                        break
             
             if limits_violated:
                 continue

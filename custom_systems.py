@@ -120,9 +120,10 @@ def export_pwf_anarede(net, filename="validacao_ieee30.pwf"):
     print(f"  -> Arquivo PWF (Tap Changer) gerado: {filename}")
 
 
-def create_ieee30_anarede():
+def create_ieee30_anarede(use_taps=True):
     """
-    Cria o sistema IEEE 30 Barras usando Tap Changers para os transformadores.
+    Cria o sistema IEEE 30 Barras fiel ao PWF do ANAREDE.
+    Inclui limites de reativo (Qmin/Qmax) e parametrização da Slack.
     """
     net = pp.create_empty_network()
     
@@ -209,14 +210,19 @@ def create_ieee30_anarede():
         if tap > 0:
             vk_pct = np.sqrt(r_pct**2 + x_pct**2)
             
-            # --- MODELAGEM COM TAP CHANGER ---
-            step_pct = abs(tap - 1.0) * 100.0
-            if step_pct < 0.001:
-                tap_pos = 0
-                tap_step = 1.0
+            if use_taps:
+                # --- MODELAGEM COM TAP CHANGER ---
+                step_pct = abs(tap - 1.0) * 100.0
+                if step_pct < 0.001:
+                    tap_pos = 0
+                    tap_step = 1.0
+                else:
+                    tap_pos = -1 if tap < 1.0 else 1
+                    tap_step = step_pct
             else:
-                tap_pos = -1 if tap < 1.0 else 1
-                tap_step = step_pct
+                # Ignora modelagem de tap (tap_pos=0)
+                tap_pos = 0
+                tap_step = 0.0
 
             pp.create_transformer_from_parameters(net, hv_bus=f, lv_bus=t, sn_mva=100, 
                 vn_hv_kv=net.bus.at[f, 'vn_kv'],

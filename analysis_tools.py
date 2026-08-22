@@ -374,16 +374,34 @@ Carga Total:   {net.res_load.p_mw.sum():.2f} MW  |  {net.res_load.q_mvar.sum():.
 Geração Total: {net.res_gen.p_mw.sum() + net.res_ext_grid.p_mw.sum():.2f} MW
 DETALHE DAS BARRAS:
 {'='*80}
-BARRA   | V (pu)  | ANG (deg) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
-{'-'*80}
+BARRA   | V (pu)  | ANG (deg) | P_GEN (MW) | Q_GEN (Mvar) | P_INJ (MW) | Q_INJ (Mvar) | TIPO
+{'-'*95}
 """
     content = header
     sorted_buses = net.res_bus.sort_values(by='vm_pu')
     for bus_id, row in sorted_buses.iterrows():
         b_type = "PQ"
-        if bus_id in net.gen.bus.values or bus_id in net.ext_grid.bus.values: b_type = "PV/REF"
-        content += f"{bus_id:<7} | {row['vm_pu']:<7.4f} | {row['va_degree']:<9.2f} | {row['p_mw']:<10.2f} | {row['q_mvar']:<12.2f} | {b_type}\n"
-    content += f"\n{'='*80}\n"
+        p_gen = 0.0
+        q_gen = 0.0
+        
+        # Check if it's a generator bus
+        if bus_id in net.gen.bus.values:
+            b_type = "PV/REF"
+            gen_idx = net.gen[net.gen.bus == bus_id].index
+            if not net.res_gen.empty and len(gen_idx) > 0:
+                p_gen = net.res_gen.loc[gen_idx, 'p_mw'].sum()
+                q_gen = net.res_gen.loc[gen_idx, 'q_mvar'].sum()
+        
+        # Check if it's an external grid (slack) bus
+        if bus_id in net.ext_grid.bus.values:
+            b_type = "PV/REF"
+            ext_idx = net.ext_grid[net.ext_grid.bus == bus_id].index
+            if not net.res_ext_grid.empty and len(ext_idx) > 0:
+                p_gen += net.res_ext_grid.loc[ext_idx, 'p_mw'].sum()
+                q_gen += net.res_ext_grid.loc[ext_idx, 'q_mvar'].sum()
+                
+        content += f"{bus_id:<7} | {row['vm_pu']:<7.4f} | {row['va_degree']:<9.2f} | {p_gen:<10.2f} | {q_gen:<12.2f} | {row['p_mw']:<10.2f} | {row['q_mvar']:<12.2f} | {b_type}\n"
+    content += f"\n{'='*95}\n"
 
     # Ajusta o nome do arquivo se necessário (main já deve passar o caminho com sufixo)
     with open(filepath, "w") as f: f.write(content)
