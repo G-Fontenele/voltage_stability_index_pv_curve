@@ -217,12 +217,11 @@ def main():
     os.makedirs(tables_dir, exist_ok=True)
     os.makedirs(figures_dir, exist_ok=True)
     
-    # 1. Copiar Figuras (SVGs)
+    # 1. Copiar Figuras (PDFs)
     figures_to_copy = [
-        ("ieee30_standard/n0_qlim_pp/pv_figures/curva_pv_sistema_30.svg", "fig_pv_30.svg"),
-        ("ieee39/n0_qlim_pp/pv_figures/curva_pv_sistema_39.svg", "fig_pv_39.svg"),
-        ("ieee30_standard/n0_qlim_pp/reports/heatmap_spearman_ramos_30.svg", "fig_heatmap_spearman_30.svg"),
-        ("ieee118/n0_qlim_pp/reports/heatmap_spearman_ramos_118.svg", "fig_heatmap_spearman_118.svg"),
+        ("ieee30_standard/n0/pv_figures/curva_pv_sistema_30.pdf", "fig_pv_30.pdf"),
+        ("ieee39/n0/pv_figures/curva_pv_sistema_39.pdf", "fig_pv_39.pdf"),
+        ("ieee30_standard/n0/reports/heatmap_spearman_ramos_30.pdf", "fig_heatmap_spearman_30.pdf"),
     ]
     
     for src_rel, dst_name in figures_to_copy:
@@ -235,7 +234,7 @@ def main():
             print(f"AVISO: Figura não encontrada: {src}")
 
     # 2. Gerar Tabela de Correlação (Spearman IEEE 30)
-    spearman_path = os.path.join(base_dir, "ieee30_standard/n0_qlim_pp/reports/correlacao_spearman_ramos_30.csv")
+    spearman_path = os.path.join(base_dir, "ieee30_standard/n0/reports/correlacao_spearman_ramos_30.csv")
     if os.path.exists(spearman_path):
         df_spearman = pd.read_csv(spearman_path, index_col=0)
         df_latex = df_spearman.reset_index()

@@ -23,7 +23,7 @@ def set_ieee_style():
         'ytick.labelsize': 8,
         'figure.figsize': (3.5, 2.6), # Tamanho para coluna simples IEEE
         'savefig.dpi': 600,
-        'savefig.format': 'eps',
+        'savefig.format': 'pdf',
         'savefig.bbox': 'tight',
         'axes.grid': True,
         'grid.alpha': 0.3,
@@ -285,7 +285,7 @@ def plot_pv_curves(history, title="Curvas PV", save_dir=".", bus_count=0):
     plt.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.)
     
     suffix = f"_{bus_count}" if bus_count > 0 else ""
-    filename = os.path.join(save_dir, f"curva_pv_sistema{suffix}.svg")
+    filename = os.path.join(save_dir, f"curva_pv_sistema{suffix}.pdf")
     plt.savefig(filename)
     plt.close()
     print(f"  -> Gráfico PV (SVG) salvo com sufixo {suffix}.")
@@ -328,7 +328,7 @@ def plot_comparative_indices(branch_scenarios, bus_scenarios, save_dir=".", bus_
         plt.axhline(y=limit, color='black', linestyle=':', linewidth=1.0)
         plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
             
-        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')
+        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.pdf')
         plt.savefig(filename)
         plt.close()
 
@@ -350,7 +350,7 @@ def plot_comparative_indices(branch_scenarios, bus_scenarios, save_dir=".", bus_
         plt.axhline(y=limit, color='black', linestyle=':', linewidth=1.0)
         plt.legend(title="Load (%)", loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0., ncol=1)
             
-        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.svg')
+        filename = os.path.join(save_dir, f'analise_{ind_name.lower()}{suffix}.pdf')
         plt.savefig(filename)
         plt.close()
 
@@ -505,9 +505,10 @@ def generate_correlation_reports(branch_df, bus_df, save_dir, bus_count=0):
         corr_spearman_bus.to_csv(os.path.join(save_dir, f"correlacao_spearman_barras{suffix}.csv"))
         corr_kendall_bus.to_csv(os.path.join(save_dir, f"correlacao_kendall_barras{suffix}.csv"))
     
-    # --- RAMOS ---
-    branch_cols_to_drop = ['Branch_ID', 'Type', 'From', 'To']
-    branch_df_clean = branch_df.drop(columns=[c for c in branch_cols_to_drop if c in branch_df.columns])
+    # --- RAMOS (Índices do Artigo) ---
+    article_indices = ['FVSI', 'Lmn', 'NLSI', 'NVSI', 'L_index']
+    branch_cols_to_keep = [c for c in article_indices if c in branch_df.columns]
+    branch_df_clean = branch_df[branch_cols_to_keep].copy()
     branch_df_clean = branch_df_clean.replace([np.inf, -np.inf], np.nan).dropna()
     
     if not branch_df_clean.empty and len(branch_df_clean) > 1:
@@ -526,7 +527,7 @@ def generate_correlation_reports(branch_df, bus_df, save_dir, bus_count=0):
             plt.yticks(range(len(corr_spearman_branch.index)), corr_spearman_branch.index)
             plt.title('Spearman Rank Correlation - Line VSIs (Collapse Point)')
             plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f"heatmap_spearman_ramos{suffix}.svg"))
+            plt.savefig(os.path.join(save_dir, f"heatmap_spearman_ramos{suffix}.pdf"))
             plt.close()
         except Exception as e:
             print(f"Erro ao gerar heatmap de correlação: {e}")

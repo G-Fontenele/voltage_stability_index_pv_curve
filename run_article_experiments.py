@@ -9,6 +9,7 @@ import custom_systems as cs
 import copy
 import pandas as pd
 from main import run_scenario, adjust_generator_participation
+import generate_article_data
 
 # ==============================================================================
 # SCRIPT DE EXECUÇÃO AUTOMATIZADA - WCNPS 2026
@@ -54,19 +55,8 @@ def main():
             "name": "IEEE 39 New England",
             "net_func": pn.case39,
             "folder": "ieee39",
-            "adjust_gen": False
-        },
-        {
-            "name": "IEEE 57",
-            "net_func": pn.case57,
-            "folder": "ieee57",
-            "adjust_gen": False
-        },
-        {
-            "name": "IEEE 118",
-            "net_func": pn.case118,
-            "folder": "ieee118",
-            "adjust_gen": False
+            "adjust_gen": False,
+            "custom_steps": 0.0005
         }
     ]
 
@@ -87,30 +77,23 @@ def main():
             adjust_generator_participation(net_n0)
             
         config_n0 = copy.deepcopy(config_default)
+        if 'custom_steps' in exp:
+            config_n0['steps'] = exp['custom_steps']
+            
         config_n0['qlim_mode'] = 'none'
         dir_n0 = os.path.join(system_dir, "n0")
         max_scale_n0 = run_scenario(net_n0, exp['name'], dir_n0, bus_count, config_n0, scenario_name="base_n0")
         print(f"   Max Scale N-0 (Sem QLIM): {max_scale_n0}")
 
-        # --- MODO 2: N-0 com QLIM (Pandapower) ---
-        print("\n-> [2/3] Analisando Caso Base N-0 (Com QLIM Pandapower)...")
-        net_n0_pp = exp['net_func']()
-        if exp['adjust_gen']:
-            adjust_generator_participation(net_n0_pp)
-            
-        config_n0_pp = copy.deepcopy(config_default)
-        config_n0_pp['qlim_mode'] = 'pandapower'
-        dir_n0_pp = os.path.join(system_dir, "n0_qlim_pp")
-        max_scale_n0_pp = run_scenario(net_n0_pp, exp['name'], dir_n0_pp, bus_count, config_n0_pp, scenario_name="base_n0_qlim_pp")
-        print(f"   Max Scale N-0 (QLIM PP): {max_scale_n0_pp}")
-
-        # --- MODO 3: N-1 com QLIM Avançado ---
-        print("\n-> [3/3] Iniciando Análise N-1 (Com Conversão PV->PQ)...")
+        print("\n-> [2/2] Iniciando Análise N-1 (Com Conversão PV->PQ)...")
         net_n1 = exp['net_func']()
         if exp['adjust_gen']:
             adjust_generator_participation(net_n1)
             
         config_n1 = copy.deepcopy(config_default)
+        if 'custom_steps' in exp:
+            config_n1['steps'] = exp['custom_steps']
+            
         config_n1['qlim_mode'] = 'pv_to_pq'
         
         dir_n1 = os.path.join(system_dir, "n1")
@@ -147,6 +130,10 @@ def main():
     print(f"BATERIA DE EXPERIMENTOS WCNPS CONCLUÍDA EM {mins}m {secs:.2f}s!")
     print(f"Todos os resultados salvos em: {base_results_dir}/")
     print(f"{'='*80}")
+    
+    print("\nIniciando formatação e geração dos dados para o artigo...")
+    generate_article_data.main()
+    print("Processo completo!")
 
 if __name__ == "__main__":
     main()
