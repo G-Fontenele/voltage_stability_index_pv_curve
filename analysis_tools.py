@@ -468,19 +468,23 @@ X----X----------------X--------------------------X-------------------------X----
         increase_pct = (scale - 1.0) * 100.0
         if increase_pct < 0: increase_pct = 0.0
         step_pct = step_used * 100.0
+        nr_iters = row.get('nr_iters', 0)
+        
         if row['mw'] > 0:
             mw_val = row['mw']
             mvar_val = row['mvar']
             line_str = (
-                f"  {iter_num:<4} {status:<13}   {increase_pct:8.3f} {increase_pct:8.3f} {increase_pct:8.3f}   "
-                f"{mw_val:8.2f} MW   {step_pct:8.4f}\n"
-                f"                                                         {mvar_val:8.2f} Mvar {step_pct:8.4f}\n"
+                f"  {iter_num:<4} {status:<13} {nr_iters:>2}  {increase_pct:8.3f}  {increase_pct:8.3f}  {increase_pct:8.3f}   "
+                f"{mw_val:8.2f} MW      {step_pct:.4f}\n"
+                f"                      {nr_iters:>2}  {increase_pct:8.3f}  {increase_pct:8.3f}  {increase_pct:8.3f}   "
+                f"{mvar_val:8.2f} Mvar    {step_pct:.4f}\n"
             )
         else:
             line_str = (
-                f"  {iter_num:<4} {status:<13}   {increase_pct:8.3f} {increase_pct:8.3f} {increase_pct:8.3f}   "
-                f"   ---      MW   {step_pct:8.4f}\n"
-                f"                                                            ---      Mvar {step_pct:8.4f}\n"
+                f"  {iter_num:<4} {status:<13} {nr_iters:>2}  {increase_pct:8.3f}  {increase_pct:8.3f}  {increase_pct:8.3f}   "
+                f"   ---   MW      {step_pct:.4f}\n"
+                f"                      {nr_iters:>2}  {increase_pct:8.3f}  {increase_pct:8.3f}  {increase_pct:8.3f}   "
+                f"   ---   Mvar    {step_pct:.4f}\n"
             )
         content += line_str
     content += f"X----X----------------X--------------------------X-------------------------X---------X\n"

@@ -8,7 +8,7 @@ import copy
 
 def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=None, max_scale=5.0, 
                              initial_step=0.1, min_step=0.001, 
-                             max_iters=2000, max_failures=10,
+                             max_iters=50, max_failures=10,
                              distributed_slack=True, qlim_mode='none',
                              # NOVOS PARÂMETROS DO SOLVER (NEWTON-RAPHSON)
                              solver_max_iter=50,  # Aumentado de 10 para 50 (Crucial perto do colapso)
@@ -72,11 +72,12 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
         pp.runpp(net_sim, enforce_q_lims=enforce_q_lims, 
                  max_iteration=solver_max_iter, tolerance_mva=solver_tol)
         
+        iters = net_sim._ppc.get('iterations', 0) if hasattr(net_sim, '_ppc') and isinstance(net_sim._ppc, dict) else 0
         _save_snapshot(net_sim, 1.0, history, current_matrices)
-        _log_attempt(full_log, 0, 1.0, 0.0, "Convergente", net_sim)
-        print(f"   -> Convergiu Base OK")
+        _log_attempt(full_log, 0, 1.0, 0.0, "Convergente", net_sim, iters)
+        print(f"   -> Convergiu Base OK (Iter: {iters})")
     except:
-        _log_attempt(full_log, 0, 1.0, 0.0, "Divergente", None)
+        _log_attempt(full_log, 0, 1.0, 0.0, "Divergente", None, 0)
         print("ERRO CRÍTICO: Caso base não converge.")
         return [], full_log
 
@@ -115,6 +116,8 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
                      init="results", 
                      max_iteration=solver_max_iter, 
                      tolerance_mva=solver_tol)
+            
+            iters = net_sim._ppc.get('iterations', 0) if hasattr(net_sim, '_ppc') and isinstance(net_sim._ppc, dict) else 0
             
             # --- VERIFICAÇÃO DE LIMITES Q ---
             limits_violated = False
@@ -160,17 +163,17 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
             # Sucesso
             consecutive_failures = 0
             _save_snapshot(net_sim, next_scale, history, current_matrices)
-            _log_attempt(full_log, total_iterations, next_scale, current_step, "Convergente", net_sim)
+            _log_attempt(full_log, total_iterations, next_scale, current_step, "Convergente", net_sim, iters)
             
             p_tot = net_sim.res_load.p_mw.sum()
-            print(f"   Iter {total_iterations}: Scale {next_scale:.5f} OK | Carga: {p_tot:.1f} MW")
+            print(f"   Iter {total_iterations}: Scale {next_scale:.5f} OK (Iter: {iters}) | Carga: {p_tot:.1f} MW")
             
             current_scale = next_scale
 
         except pp.LoadflowNotConverged:
             # Falha
             consecutive_failures += 1
-            _log_attempt(full_log, total_iterations, next_scale, current_step, "Divergente", None)
+            _log_attempt(full_log, total_iterations, next_scale, current_step, "Divergente", None, 0)
             print(f"   Iter {total_iterations}: Falha em {next_scale:.5f}. Reduzindo passo...")
 
             if consecutive_failures >= max_failures: break
@@ -201,8 +204,8 @@ def _save_snapshot(net, scale, history_list, static_matrices):
     }
     history_list.append(snapshot)
 
-def _log_attempt(log_list, iter_num, scale, step_used, status, net=None):
-    row = {'iter': iter_num, 'scale': scale, 'step': step_used, 'status': status, 
+def _log_attempt(log_list, iter_num, scale, step_used, status, net=None, nr_iters=0):
+    row = {'iter': iter_num, 'scale': scale, 'step': step_used, 'status': status, 'nr_iters': nr_iters, 
            'mw': 0.0, 'mvar': 0.0, 'p_gen': 0.0, 'p_slack': 0.0, 'vmin': 0.0}
     if net is not None:
         row['mw'] = net.res_load.p_mw.sum()
