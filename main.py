@@ -103,7 +103,7 @@ def main():
         'distributed_slack': True,    
         'max_scale': 5.0,             
         'steps': 0.002,                
-        'min_step': 0.00001,
+        'min_step': 0.0005,
         'max_iters': 2000,
         'max_failures': 15,
         'solver_max_iter': 20,
