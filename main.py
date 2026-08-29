@@ -57,8 +57,10 @@ def select_mode():
     print("  [3] N-0 com QLIM (Pandapower - enforce_q_lims)")
     print("  [4] N-0 com QLIM (Agregacao de PV para PQ)")
     print("  [5] N-1 (Todas as Contingencias de Linha - CPF)")
-    choice = input("\nEscolha a opcao (1-5) [Padrao: 2 - CPF]: ").strip()
+    print("  [6] N-1 (Todas as Contingencias de Linha - SPF)")
+    choice = input("\nEscolha a opcao (1-6) [Padrao: 2 - CPF]: ").strip()
     
+    if choice == "6": return True, "none", "spf"
     if choice == "5": return True, "none", "cpf"
     if choice == "4": return False, "pv_to_pq", "spf"
     if choice == "3": return False, "pandapower", "spf"

@@ -144,44 +144,29 @@ def generate_convergence_summary_table(tables_dir, convergence_report_path):
     with open(convergence_report_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
         
-    # Parse das últimas iterações (do fim pro começo, pegando até um certo limite)
     last_iters = []
     for line in reversed(lines):
-        if "X----X" in line: continue
-        if line.strip() == "": continue
+        if "---" in line or line.strip() == "": continue
         
-        if "Convergente" in line or "Divergente" in line:
-            parts = line.split()
-            try:
-                iter_num = parts[0]
-                status = parts[1]
-                # Procurar o MW
-                mw_val = "---"
-                for p in parts:
-                    if p == "MW":
-                        mw_val = parts[parts.index(p)-1]
-                        break
-                # Procurar o Passo e Lambda
-                lambda_val = parts[2]
-                step_val = parts[-1]
-                
-                # Mas no python, a formatação de convergencia: 
-                # 985 Convergente 195.860 195.860 195.860 838.47 MW 0.0125
-                if status == "Convergente":
-                    status_tex = "Converged"
-                else:
-                    status_tex = "\\textbf{Divergent}"
-                
-                # No relatório python, lambda - 1 * 100
-                # O usuário quer exibir o lambda final, então (lambda_val/100) + 1
-                lam = (float(lambda_val)/100.0) + 1.0
-                
-                # Passo tb tá em %
-                step_pu = float(step_val) / 100.0
-                
-                last_iters.append((iter_num, status_tex, f"{step_pu:.4f}", f"{lam:.4f}", mw_val))
-            except Exception as e:
-                pass
+        if "Convergente" in line or "Divergente" in line or "Falha" in line or "OK" in line:
+            # Novo formato: 1 | 1.02673 | 291.03 | 0.05000 | Convergente
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 5:
+                try:
+                    iter_num = parts[0]
+                    lam = float(parts[1])
+                    mw_val = parts[2]
+                    step_val = float(parts[3])
+                    status = parts[4]
+                    
+                    if "Convergente" in status or "OK" in status:
+                        status_tex = "Converged"
+                    else:
+                        status_tex = "\\textbf{Divergent}"
+                        
+                    last_iters.append((iter_num, status_tex, f"{step_val:.4f}", f"{lam:.4f}", mw_val))
+                except Exception as e:
+                    pass
         
         if len(last_iters) >= 5: break
         
@@ -207,10 +192,72 @@ def generate_convergence_summary_table(tables_dir, convergence_report_path):
     
     with open(os.path.join(tables_dir, "tab_convergencia.tex"), "w", encoding="utf-8") as f:
         f.write("\n".join(table_lines) + "\n")
-    print("Tabela III (Convergência) gerada.")
+    print("Tabela III (Convergência Python) gerada.")
 
-def main():
-    base_dir = "outputs"
+def generate_anarede_convergence_table(tables_dir):
+    # Texto hardcoded fornecido pelo usuário (ANAREDE original)
+    anarede_log = """
+   973 Convergente    2  194.600  194.600  194.600   834.90 MW      0.2000
+                      2  194.600  194.600  194.600   371.79 Mvar    0.2000
+   974 Convergente    3  194.800  194.800  194.800   835.46 MW      0.2000
+                      3  194.800  194.800  194.800   372.04 Mvar    0.2000
+   975 Convergente    3  195.000  195.000  195.000   836.03 MW      0.2000
+                      3  195.000  195.000  195.000   372.29 Mvar    0.2000
+   976 Divergente     5                                             0.2000
+                      5                                             0.2000
+   977 Nao Converg.  31                                             0.1000
+                     31                                             0.1000
+   978 Nao Converg.  31                                             0.0500
+                     31                                             0.0500
+"""
+    
+    last_iters = []
+    lines = anarede_log.strip().split('\n')
+    for line in lines:
+        if "MW" in line or "Divergente" in line or "Nao Converg." in line:
+            parts = line.split()
+            iter_num = parts[0]
+            status = parts[1]
+            if status == "Nao": 
+                status = "Nao Converg."
+            
+            if "Convergente" in status:
+                status_tex = "Converged"
+                lam_val = float(parts[3]) / 100.0  # ANAREDE usa lambda * 100
+                mw_val = parts[6]
+                step_val = float(parts[-1]) / 100.0
+            else:
+                status_tex = "\\textbf{Divergent}"
+                lam_val = "---"
+                mw_val = "---"
+                step_val = float(parts[-1]) / 100.0
+                
+            last_iters.append((iter_num, status_tex, f"{step_val:.4f}", f"{lam_val:.4f}" if isinstance(lam_val, float) else lam_val, mw_val))
+            
+    table_lines = [
+        "\\begin{table}[htbp]",
+        "\\centering",
+        "\\caption{Summary of the Final Iterations from ANAREDE Convergence Report}",
+        "\\label{tab:convergencia_anarede}",
+        "\\begin{tabular}{llccr}",
+        "\\toprule",
+        "\\textbf{Iter} & \\textbf{Status} & \\textbf{Step} & $\\bm{\\lambda}$ \\textbf{(Total)} & \\textbf{Load (MW)} \\\\ \\midrule",
+        "... & ... & ... & ... & ... \\\\"
+    ]
+    
+    for (it, st, step, lam, mw) in last_iters:
+        table_lines.append(f"{it} & {st} & {step} & {lam} & {mw} \\\\")
+        
+    table_lines.append("\\bottomrule")
+    table_lines.append("\\end{tabular}")
+    table_lines.append("\\end{table}")
+    
+    with open(os.path.join(tables_dir, "tab_convergencia_anarede.tex"), "w", encoding="utf-8") as f:
+        f.write("\n".join(table_lines) + "\n")
+    print("Tabela IV (Convergência ANAREDE) gerada.")
+
+def main(base_dir="outputs"):
+
     tables_dir = os.path.join(base_dir, "tables")
     figures_dir = os.path.join(base_dir, "figures")
     
@@ -219,9 +266,9 @@ def main():
     
     # 1. Copiar Figuras (PDFs)
     figures_to_copy = [
-        ("ieee30_standard/n0/pv_figures/curva_pv_sistema_30.pdf", "fig_pv_30.pdf"),
-        ("ieee39/n0/pv_figures/curva_pv_sistema_39.pdf", "fig_pv_39.pdf"),
-        ("ieee30_standard/n0/reports/heatmap_spearman_ramos_30.pdf", "fig_heatmap_spearman_30.pdf"),
+        ("ieee_30_anarede_pwf_tcc/pv_figures/curva_pv_sistema_30.pdf", "fig_pv_30.pdf"),
+        ("ieee_39_barras_new_england/pv_figures/curva_pv_sistema_39.pdf", "fig_pv_39.pdf"),
+        ("ieee_30_anarede_pwf_tcc/reports/heatmap_spearman_ramos_30.pdf", "fig_heatmap_spearman_30.pdf"),
     ]
     
     for src_rel, dst_name in figures_to_copy:
@@ -234,7 +281,7 @@ def main():
             print(f"AVISO: Figura não encontrada: {src}")
 
     # 2. Gerar Tabela de Correlação (Spearman IEEE 30)
-    spearman_path = os.path.join(base_dir, "ieee30_standard/n0/reports/correlacao_spearman_ramos_30.csv")
+    spearman_path = os.path.join(base_dir, "ieee_30_anarede_pwf_tcc/reports/correlacao_spearman_ramos_30.csv")
     if os.path.exists(spearman_path):
         df_spearman = pd.read_csv(spearman_path, index_col=0)
         df_latex = df_spearman.reset_index()
@@ -247,7 +294,7 @@ def main():
         print("Tabela Spearman gerada.")
 
     # 3. Gerar Tabela N-1 Ranking (IEEE 30)
-    ranking_path = os.path.join(base_dir, "ieee30_standard/n1/contingencies/ranking_contingencias.csv")
+    ranking_path = os.path.join(base_dir, "ieee_30_anarede_pwf_tcc/contingencies/ranking_contingencias.csv")
     if os.path.exists(ranking_path):
         df_ranking = pd.read_csv(ranking_path).head(10) # Top 10
         generate_latex_table_from_df(
@@ -259,12 +306,13 @@ def main():
         print("Tabela N-1 gerada.")
 
     # 4. Gerar Tabelas do Artigo (Baseadas no ANAREDE IEEE 30)
-    initial_report_path = os.path.join(base_dir, "ieee30_anarede/n0/reports/relatorio_inicial_base_n0_30.txt")
-    convergence_report_path = os.path.join(base_dir, "ieee30_anarede/n0/reports/relatorio_convergencia_base_n0_30.txt")
+    initial_report_path = os.path.join(base_dir, "ieee_30_anarede_pwf_tcc/reports/relatorio_inicial_base_30.txt")
+    convergence_report_path = os.path.join(base_dir, "ieee_30_anarede_pwf_tcc/reports/relatorio_convergencia_base_30.txt")
     
     generate_voltage_comparison_table(tables_dir, initial_report_path)
     generate_generation_comparison_table(tables_dir, initial_report_path)
     generate_convergence_summary_table(tables_dir, convergence_report_path)
+    generate_anarede_convergence_table(tables_dir)
 
 if __name__ == "__main__":
     main()
