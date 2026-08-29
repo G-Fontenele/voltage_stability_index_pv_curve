@@ -2,6 +2,7 @@ import pandapower as pp
 import numpy as np
 import pandas as pd
 import copy
+import cpf_solver
 # ==============================================================================
 # MOTOR DE SIMULAÇÃO (CPF) - CORRIGIDO COM SOLVER PARAMS
 # ==============================================================================
@@ -10,12 +11,18 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
                              initial_step=0.1, min_step=0.001, 
                              max_iters=50, max_failures=10,
                              distributed_slack=True, qlim_mode='none',
-                             # NOVOS PARÂMETROS DO SOLVER (NEWTON-RAPHSON)
+                             # NOVOS PARAMETROS DO SOLVER (NEWTON-RAPHSON)
                              solver_max_iter=50,  # Aumentado de 10 para 50 (Crucial perto do colapso)
-                             solver_tol=1e-6):    # Tolerância de Mismatch (MVA)
+                             solver_tol=1e-6,     # Tolerancia de Mismatch (MVA)
+                             # MODO CPF: 'spf' (Successive PF, padrao retrocompativel)
+                             #           'cpf' (CPF verdadeiro Preditor-Corretor, PADRAO ARTIGO)
+                             cpf_mode='spf'):
     
     print(f"\n{'='*80}")
-    print(f" MOTOR DE SIMULAÇÃO: FLUXO DE POTÊNCIA CONTINUADO (CPF)")
+    if cpf_mode == 'cpf':
+        print(f" MOTOR DE SIMULACAO: MODO CPF VERDADEIRO (Preditor-Corretor)")
+    else:
+        print(f" MOTOR DE SIMULACAO: MODO SPF (Successive Power Flow)")
     print(f"{'='*80}")
     print(f" CONFIGURAÇÃO DE PARADA:")
     print(f"  > DINC (Limite):    {max_scale}")
@@ -28,9 +35,25 @@ def run_continuation_process(net, initial_static_matrices, load_scaling_bus_id=N
     print(f" CONFIGURAÇÃO DE QLIM:")
     print(f"  > Modo:             {qlim_mode}")
     print(f"{'='*80}\n")
+    # --- Delegacao para CPF verdadeiro ---
+    if str(cpf_mode).lower() == 'cpf':
+        return cpf_solver.run_cpf(
+            net, initial_static_matrices,
+            load_scaling_bus_id=load_scaling_bus_id,
+            max_scale=max_scale,
+            initial_step=initial_step,
+            min_step=min_step,
+            max_iters=max_iters,
+            max_failures=max_failures,
+            distributed_slack=distributed_slack,
+            qlim_mode=qlim_mode,
+            solver_max_iter=solver_max_iter,
+            solver_tol=solver_tol
+        )
+
+    # --- SPF abaixo (modo retrocompativel) ---
 
     net_sim = copy.deepcopy(net)
-    
     qlim_mode = str(qlim_mode).lower()
     enforce_q_lims = (qlim_mode in ['pandapower', 'pv_to_pq'])
     use_pv_to_pq = (qlim_mode == 'pv_to_pq')

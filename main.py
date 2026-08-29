@@ -50,19 +50,21 @@ def select_system():
 
 def select_mode():
     print("\n" + "="*50)
-    print(" MODO DE OPERAÇÃO:")
+    print(" MODO DE OPERACAO:")
     print("="*50)
-    print("  [1] N-0 (Apenas Caso Base, sem QLIM)")
-    print("  [2] N-0 com QLIM (Pandapower - enforce_q_lims)")
-    print("  [3] N-0 com QLIM (Agregação de PV para PQ)")
-    print("  [4] N-1 (Todas as Contingências de Linha - Sem QLIM)")
-    choice = input("\nEscolha a opção (1-4) [Padrão: 1]: ").strip()
+    print("  [1] N-0 (SPF - Successive Power Flow, sem QLIM)")
+    print("  [2] N-0 (CPF Verdadeiro - Preditor-Corretor, PADRAO ARTIGO)")
+    print("  [3] N-0 com QLIM (Pandapower - enforce_q_lims)")
+    print("  [4] N-0 com QLIM (Agregacao de PV para PQ)")
+    print("  [5] N-1 (Todas as Contingencias de Linha - CPF)")
+    choice = input("\nEscolha a opcao (1-5) [Padrao: 2 - CPF]: ").strip()
     
-    if choice == "4": return True, "none"
-    if choice == "3": return False, "pv_to_pq"
-    if choice == "2": return False, "pandapower"
+    if choice == "5": return True, "none", "cpf"
+    if choice == "4": return False, "pv_to_pq", "spf"
+    if choice == "3": return False, "pandapower", "spf"
+    if choice == "1": return False, "none", "spf"
     
-    return False, "none"  # default
+    return False, "none", "cpf"  # default: CPF verdadeiro
 
 def adjust_generator_participation(net):
     """Ajusta o despacho inicial do Gerador 2 para 13.3% (Apenas IEEE 30 Padrão)."""
@@ -93,9 +95,8 @@ def main():
     print_intro()
     
     systems_to_run = select_system()
-    run_n1, qlim_mode = select_mode()
+    run_n1, qlim_mode, cpf_mode = select_mode()
     
-    # --- CONFIGURAÇÃO DE ALTA PRECISÃO ---
     CONFIG = {
         'load_scaling_bus_id': None, 
         'qlim_mode': qlim_mode,      
@@ -105,10 +106,9 @@ def main():
         'min_step': 0.00001,
         'max_iters': 2000,
         'max_failures': 15,
-        # 'solver_max_iter': 50,
-        # 'solver_tol': 1e-6
         'solver_max_iter': 20,
-        'solver_tol': 0.1
+        'solver_tol': 0.1,
+        'cpf_mode': cpf_mode,    # 'cpf' = CPF verdadeiro (artigo), 'spf' = retrocompativel
     }
     print(f"Parâmetros Globais: {CONFIG}")
 
@@ -228,7 +228,8 @@ def run_scenario(net, system_name, output_dir, bus_count, CONFIG, scenario_name=
         qlim_mode=CONFIG['qlim_mode'],
         distributed_slack=CONFIG['distributed_slack'],
         solver_max_iter=CONFIG['solver_max_iter'],
-        solver_tol=CONFIG['solver_tol']
+        solver_tol=CONFIG['solver_tol'],
+        cpf_mode=CONFIG.get('cpf_mode', 'spf')  # default spf para retrocompatibilidade
     )
     
     if not history: 

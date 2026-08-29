@@ -25,7 +25,10 @@ def main():
     base_results_dir = "outputs"
     os.makedirs(base_results_dir, exist_ok=True)
 
-    # Configuração Padrão
+    # Configuracao Padrao
+    # NOTA: cpf_mode='cpf' usa o CPF verdadeiro (Preditor-Corretor, estilo ANAREDE /EXCF)
+    # Este e o modo padrao para o artigo WCNPS 2026.
+    # Para usar o SPF retrocompativel, use cpf_mode='spf'.
     config_default = {
         'load_scaling_bus_id': None, 
         'distributed_slack': True,    
@@ -35,7 +38,8 @@ def main():
         'max_iters': 2000,
         'max_failures': 15,
         'solver_max_iter': 20,
-        'solver_tol': 0.1
+        'solver_tol': 0.1,
+        'cpf_mode': 'cpf',   # CPF Verdadeiro (PADRAO DO ARTIGO)
     }
 
     experiments = [
@@ -83,7 +87,7 @@ def main():
         config_n0['qlim_mode'] = 'none'
         dir_n0 = os.path.join(system_dir, "n0")
         max_scale_n0 = run_scenario(net_n0, exp['name'], dir_n0, bus_count, config_n0, scenario_name="base_n0")
-        print(f"   Max Scale N-0 (Sem QLIM): {max_scale_n0}")
+        print(f"   Max Scale N-0 ({config_n0['cpf_mode'].upper()}): {max_scale_n0}")
 
         print("\n-> [2/2] Iniciando Análise N-1 (Com Conversão PV->PQ)...")
         net_n1 = exp['net_func']()
